@@ -1076,7 +1076,7 @@ def analyze(
             verdict, reasons = VERDICT_PROTECTED, _windows_health(g, ctx, boot_entries)
         elif g.kind == "firmware":
             verdict = VERDICT_NOT_TARGET
-            reasons = ["Entri bawaan firmware atau perangkat (jaringan, USB, fallback). Tidak disentuh DistroHop."]
+            reasons = ["Entri bawaan firmware atau perangkat (jaringan, USB, fallback). Tidak disentuh DistroRelay."]
         elif g.kind == "other":
             verdict = VERDICT_NOT_TARGET
             reasons = ["Folder ini tidak berisi bootloader Linux yang dikenal. Jangan dihapus kecuali kamu tahu isinya."]

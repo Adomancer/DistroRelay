@@ -1,4 +1,4 @@
-"""Lokasi folder data aplikasi (%LOCALAPPDATA%\\DistroHop)."""
+"""Lokasi folder data aplikasi (%LOCALAPPDATA%\\DistroRelay)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 def app_data_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     root = Path(base) if base else Path.home() / ".local" / "share"
-    return root / "DistroHop"
+    return root / "DistroRelay"
 
 
 def logs_dir() -> Path:

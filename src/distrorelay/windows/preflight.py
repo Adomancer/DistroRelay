@@ -30,7 +30,7 @@ MANUAL = "perlu konfirmasi"
 # Cmdlet tambahan yang boleh dipakai preflight/backup M2a (lihat AllowListRunner).
 M2A_CMDLETS = frozenset({"mount-diskimage", "dismount-diskimage"})
 
-ISO_MOUNT_SCRIPT = r"""# distrohop:iso-mount
+ISO_MOUNT_SCRIPT = r"""# distrorelay:iso-mount
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $image = Mount-DiskImage -ImagePath '__PATH__' -Access ReadOnly -StorageType ISO -PassThru
@@ -38,7 +38,7 @@ $letter = ($image | Get-Volume).DriveLetter
 ConvertTo-Json -InputObject ([string]$letter) -Compress
 """
 
-ISO_DISMOUNT_SCRIPT = r"""# distrohop:iso-dismount
+ISO_DISMOUNT_SCRIPT = r"""# distrorelay:iso-dismount
 $ErrorActionPreference = 'Stop'
 $null = Dismount-DiskImage -ImagePath '__PATH__'
 """

@@ -1,4 +1,4 @@
-"""Logging ke file harian di %LOCALAPPDATA%\\DistroHop\\logs."""
+"""Logging ke file harian di %LOCALAPPDATA%\\DistroRelay\\logs."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def setup_logging(verbose: bool = False) -> Path | None:
     try:
         directory = logs_dir()
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"distrohop-{date.today():%Y-%m-%d}.log"
+        path = directory / f"distrorelay-{date.today():%Y-%m-%d}.log"
         handler = logging.FileHandler(path, encoding="utf-8")
     except OSError:
         return None

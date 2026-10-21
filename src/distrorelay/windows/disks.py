@@ -12,7 +12,7 @@ from .runner import Runner, powershell_args
 
 MIB = 1024 * 1024
 
-DISKS_SCRIPT = r"""# distrohop:disks
+DISKS_SCRIPT = r"""# distrorelay:disks
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $disks = @(Get-Disk | ForEach-Object {

@@ -2,7 +2,7 @@
 
 import dataclasses
 
-from distrohop.windows.uninstall_plan import build_plan, expand_selection
+from distrorelay.windows.uninstall_plan import build_plan, expand_selection
 from test_laptop_real import analyze_laptop, real_entries
 
 FEDORA_BCD = "{8bd7fdcc-13ca-11f1-84fe-806e6f6e6963}"

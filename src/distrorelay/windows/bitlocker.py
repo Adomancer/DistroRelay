@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .runner import Runner, powershell_args
 
-BITLOCKER_SCRIPT = r"""# distrohop:bitlocker
+BITLOCKER_SCRIPT = r"""# distrorelay:bitlocker
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $volumes = @(Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume | ForEach-Object {

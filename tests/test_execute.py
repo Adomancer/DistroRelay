@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from distrohop.windows.backup import backup_runner, create_backup
-from distrohop.windows.bootentries import BOOTMGR_ID
-from distrohop.windows.execute import (
+from distrorelay.windows.backup import backup_runner, create_backup
+from distrorelay.windows.bootentries import BOOTMGR_ID
+from distrorelay.windows.execute import (
     ExecutionError,
     SimulatedCrash,
     check_gate,
@@ -15,13 +15,13 @@ from distrohop.windows.execute import (
     execution_runner,
     safe_esp_path,
 )
-from distrohop.windows.journal import Journal, incomplete_sessions, read_journal, summarize
-from distrohop.windows.postcheck import post_check
-from distrohop.windows.preflight import MANUAL, OK, Check, PreflightResult
-from distrohop.windows.restore import restore_boot_entry, restore_esp_items, restore_runner
-from distrohop.windows.runner import ReadOnlyViolation
-from distrohop.windows.scanner import run_scan
-from distrohop.windows.uninstall_plan import build_plan, expand_selection
+from distrorelay.windows.journal import Journal, incomplete_sessions, read_journal, summarize
+from distrorelay.windows.postcheck import post_check
+from distrorelay.windows.preflight import MANUAL, OK, Check, PreflightResult
+from distrorelay.windows.restore import restore_boot_entry, restore_esp_items, restore_runner
+from distrorelay.windows.runner import ReadOnlyViolation
+from distrorelay.windows.scanner import run_scan
+from distrorelay.windows.uninstall_plan import build_plan, expand_selection
 from helpers import BOOTMGFW, SHIM, fake_mount, laptop_world
 
 SELECT = ["efi:fedora", "efi:arch", "grubdir:grub"]
@@ -336,7 +336,7 @@ def test_every_boot_change_is_written_to_disk_before_the_next_step(tmp_path):
 
 
 def test_failed_flush_stops_execution(tmp_path):
-    from distrohop.windows.flush import FlushError
+    from distrorelay.windows.flush import FlushError
 
     bcd, esp_root, deps, report, plan, backup = world(tmp_path)
     gate = gate_for(tmp_path, plan, report, backup)
@@ -351,7 +351,7 @@ def test_failed_flush_stops_execution(tmp_path):
 
 
 def test_restore_selects_duplicate_names_by_boot_number():
-    from distrohop.windows.restore import select_backup_entries
+    from distrorelay.windows.restore import select_backup_entries
 
     records = [
         {"description": "Arch", "path": "\\EFI\\Arch\\grubx64.efi", "nvram_number": 8, "bcd_id": "{a}"},
@@ -368,7 +368,7 @@ def test_restore_selects_duplicate_names_by_boot_number():
 
 
 def test_interrupted_session_is_resolved_only_by_a_later_green_session(tmp_path):
-    from distrohop.windows.journal import sessions
+    from distrorelay.windows.journal import sessions
 
     directory = tmp_path / "journal"
     crashed = Journal.start(directory, "20261022-040607", {"backup": "b1"})
@@ -377,7 +377,8 @@ def test_interrupted_session_is_resolved_only_by_a_later_green_session(tmp_path)
     failed = Journal.start(directory, "20261022-041000", {"backup": "b2"})
     failed.finish(True, "Semua langkah selesai")
     failed.post_check(False, ["Entri lain tetap ada"])
-    assert [s.path.stem for s in incomplete_sessions(directory)] == ["20261022-040607"]
+    # Post-check gagal juga meninggalkan keadaan setengah jadi, dan tidak menuntaskan sesi sebelumnya.
+    assert [s.path.stem for s in incomplete_sessions(directory)] == ["20261022-040607", "20261022-041000"]
 
     green = Journal.start(directory, "20261022-043352", {"backup": "b3"})
     green.finish(True, "Semua langkah selesai")

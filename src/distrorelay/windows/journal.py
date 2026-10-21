@@ -1,7 +1,7 @@
 """Journal eksekusi: setiap langkah dicatat 'started' sebelum dan 'done'/'failed' sesudah dijalankan.
 
-Disimpan sebagai JSON Lines di %LOCALAPPDATA%\\DistroHop\\journal\\<sesi>.jsonl, dan setiap baris di-fsync.
-Kalau proses terhenti (crash, mati listrik), sesi tanpa 'session-end' terdeteksi saat DistroHop dibuka lagi,
+Disimpan sebagai JSON Lines di %LOCALAPPDATA%\\DistroRelay\\journal\\<sesi>.jsonl, dan setiap baris di-fsync.
+Kalau proses terhenti (crash, mati listrik), sesi tanpa 'session-end' terdeteksi saat DistroRelay dibuka lagi,
 lengkap dengan langkah terakhir yang sempat dimulai.
 """
 
@@ -87,10 +87,16 @@ class SessionSummary:
     backup: str | None = None  # ID backup yang dipakai sesi ini
     post_check_ok: bool | None = None  # None = post-check tidak tercatat
     resolved_by: str | None = None  # sesi sesudahnya yang selesai dengan post-check hijau
+    end_message: str = ""
+
+    @property
+    def left_partial_state(self) -> bool:
+        """Terputus, dihentikan, gagal, atau post-check gagal: sistem mungkin setengah jadi."""
+        return not self.finished or not self.ok or self.post_check_ok is False
 
     @property
     def needs_attention(self) -> bool:
-        return not self.finished and self.resolved_by is None
+        return self.left_partial_state and self.resolved_by is None
 
 
 def summarize(path: Path) -> SessionSummary:
@@ -110,6 +116,7 @@ def summarize(path: Path) -> SessionSummary:
         unfinished_step=open_steps[-1] if open_steps else None,
         backup=(start.data or {}).get("backup") if start else None,
         post_check_ok=(check.data or {}).get("ok") if check else None,
+        end_message=end.message if end else "",
     )
 
 
@@ -119,7 +126,7 @@ def sessions(directory: Path | None = None) -> list[SessionSummary]:
         return []
     found = [summarize(p) for p in sorted(directory.glob("*.jsonl"))]  # nama sesi = waktu mulai
     for n, session in enumerate(found):
-        if session.finished:
+        if not session.left_partial_state:
             continue
         later = next((s for s in found[n + 1 :] if s.finished and s.ok and s.post_check_ok), None)
         session.resolved_by = later.path.stem if later else None
@@ -127,5 +134,5 @@ def sessions(directory: Path | None = None) -> list[SessionSummary]:
 
 
 def incomplete_sessions(directory: Path | None = None) -> list[SessionSummary]:
-    """Sesi terputus yang belum dituntaskan oleh sesi sesudahnya."""
+    """Sesi yang meninggalkan keadaan setengah jadi dan belum dituntaskan oleh sesi sesudahnya."""
     return [s for s in sessions(directory) if s.needs_attention]

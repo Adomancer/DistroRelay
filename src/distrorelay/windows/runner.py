@@ -39,8 +39,8 @@ class ReadOnlyViolation(PermissionError):
     """Perintah ditolak karena bisa mengubah sistem."""
 
 
-# Setiap script PowerShell diawali penanda `# distrohop:<nama>` supaya bisa dikenali di test & log.
-_SCRIPT_MARKER = re.compile(r"^#\s*distrohop:(?P<name>[\w-]+)", re.MULTILINE)
+# Setiap script PowerShell diawali penanda `# distrorelay:<nama>` supaya bisa dikenali di test & log.
+_SCRIPT_MARKER = re.compile(r"^#\s*distrorelay:(?P<name>[\w-]+)", re.MULTILINE)
 
 
 def powershell_args(script: str) -> list[str]:
@@ -174,7 +174,7 @@ _CALL_OPERATOR = re.compile(r"&\s*['\"$({]")
 
 
 def check_powershell(script: str, allowed: frozenset[str] = ALLOWED_CMDLETS) -> None:
-    """Penjaga lapis tambahan untuk script DistroHop sendiri (bukan sandbox untuk script asing)."""
+    """Penjaga lapis tambahan untuk script DistroRelay sendiri (bukan sandbox untuk script asing)."""
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     # Isi string '...' (path file, dengan ' digandakan) bukan kode, jadi tidak ikut dipindai.
     code = _SINGLE_QUOTED.sub("''", code)

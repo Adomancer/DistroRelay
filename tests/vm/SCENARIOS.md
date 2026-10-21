@@ -38,6 +38,10 @@ Linux sungguhan, jadi wajib sebelum menghapus Linux yang **masih terpasang**, bu
 
 ## Skenario
 
+Kolom "Lolos" mencatat versi kode saat skenario itu lolos. Setiap perubahan di jalur eksekusi (mis. refactor
+`UninstallFlow` di M2c fase A) berarti skenario 2, 3, 7, 7b, 7c, 9, dan 10 **diulang dengan kode terbaru** sebelum
+laptop asli. Skenario 8 juga, karena prosedurnya memakai folder `esp\` hasil backup.
+
 | # | Skenario | Yang dicek | Untuk | Lolos |
 |---|---|---|---|---|
 | 1 | Uninstall Linux yang masih utuh (Fedora + GRUB) | VM langsung boot ke Windows, post-check hijau | M2b, M3 | [ ] |
@@ -46,7 +50,9 @@ Linux sungguhan, jadi wajib sebelum menghapus Linux yang **masih terpasang**, bu
 | 4 | Entri merujuk `.efi` yang hilang, atau folder tanpa entri | Status yatim / tidak pasti benar | M1b, M2b | [ ] |
 | 5 | Arch + systemd-boot (kernel, `loader/`, UKI di ESP) | File dikelompokkan ke instalasi yang benar | M1b, M2b | [ ] |
 | 6 | Dua Linux terinstall, hapus satu | Milik distro lain tidak tersentuh, distro itu masih bisa boot | M2b, M3 | [ ] |
-| 7 | Gagal di tengah (`DISTROHOP_FAIL_AFTER=<aksi>`, build dev) + VM dimatikan paksa | Journal mendeteksi, post-check & Pulihkan bekerja, Windows tetap boot | M2b | [x] 2026-10-22, setelah perbaikan flush BCD |
+| 7 | Gagal di tengah (`DISTRORELAY_FAIL_AFTER=<aksi>`, build dev) + VM dimatikan paksa | Journal mendeteksi, post-check & Pulihkan bekerja, Windows tetap boot | M2b | [x] 2026-10-22, setelah perbaikan flush BCD |
+| 7b | Ctrl+C saat `uninstall` sedang jalan | Langkah yang sedang jalan selesai dulu, lalu berhenti; journal "dihentikan"; `uninstall` berikutnya minta LANJUT; Windows tetap boot | M2c | [ ] |
+| 7c | Jendela PowerShell ditutup (X) saat `uninstall` sedang jalan | Sama dengan 7b sejauh Windows memberi waktu (±5 detik); kalau tidak sempat, journal TERPUTUS | M2c | [ ] |
 | 8 | Boot rusak sengaja (`EFI\Microsoft` dihapus di VM) | `docs/RECOVERY.md` berhasil sampai Windows boot lagi (**latihan untuk kamu**) | M2b | [ ] |
 | 9 | `RestoreEspFiles` + `RestoreBootEntry` + `RestorePartition` setelah skenario 1 | Linux bisa boot lagi; setelah 2× reboot entri yang dipulihkan tidak jadi dobel (di VirtualBox, entri buatan `bcdedit /copy` pernah dibuat ulang tiap boot) | M2b, M3 | [~] 2026-10-22: ESP + entri lolos, stabil 2× reboot; Linux boot & partisi belum (butuh Linux sungguhan / M3) |
 | 10 | NVRAM di-reset (hapus file `.nvram` VM) setelah uninstall | Boot ke Windows lewat fallback, dengan dan tanpa `RestoreFallbackToWindows` | M2b | [x] 2026-10-22: dengan → desktop Windows; tanpa → "No bootable option or device was found" |
@@ -57,26 +63,26 @@ Di dalam VM Windows (dual-boot dengan Linux), clone repo, buat venv, lalu:
 
 ```powershell
 # 1. Backup dengan salinan ke drive eksternal (di VM: virtual disk kedua, misal E:)
-.venv\Scripts\python.exe -m distrohop backup --drive E
+.venv\Scripts\python.exe -m distrorelay backup --drive E
 
 # 2. Lihat kandidat & rencana
-.venv\Scripts\python.exe -m distrohop plan
-.venv\Scripts\python.exe -m distrohop plan --select efi:fedora
+.venv\Scripts\python.exe -m distrorelay plan
+.venv\Scripts\python.exe -m distrorelay plan --select efi:fedora
 
 # 3. Jalankan (jawab "vm" saat ditanya)
-.venv\Scripts\python.exe -m distrohop uninstall --select efi:fedora --backup <ID>
+.venv\Scripts\python.exe -m distrorelay uninstall --select efi:fedora --backup <ID>
 
 # Skenario 7 (crash di tengah): hanya aktif kalau dua variabel ini di-set
-$env:DISTROHOP_DEV = "1"; $env:DISTROHOP_FAIL_AFTER = "3"
-.venv\Scripts\python.exe -m distrohop uninstall --select efi:fedora --backup <ID>
-.venv\Scripts\python.exe -m distrohop journal
+$env:DISTRORELAY_DEV = "1"; $env:DISTRORELAY_FAIL_AFTER = "3"
+.venv\Scripts\python.exe -m distrorelay uninstall --select efi:fedora --backup <ID>
+.venv\Scripts\python.exe -m distrorelay journal
 
 # Skenario 9 (pulihkan)
-.venv\Scripts\python.exe -m distrohop restore --backup <ID> --esp-item EFI\fedora --boot-entry Fedora
+.venv\Scripts\python.exe -m distrorelay restore --backup <ID> --esp-item EFI\fedora --boot-entry Fedora
 ```
 
 ## Khusus M2a (sudah bisa dicoba sekarang)
 
-- [ ] `distrohop backup --usb <huruf>` di VM: semua verifikasi `[ok]`, folder `esp\` di USB lengkap
+- [ ] `distrorelay backup --usb <huruf>` di VM: semua verifikasi `[ok]`, folder `esp\` di USB lengkap
 - [ ] Ubah satu file di salinan USB → verifikasi ulang mendeteksi hash tidak cocok
-- [ ] `distrohop plan --select ...` menampilkan urutan: Windows pertama → fallback → entri → folder
+- [ ] `distrorelay plan --select ...` menampilkan urutan: Windows pertama → fallback → entri → folder

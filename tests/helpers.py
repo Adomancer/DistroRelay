@@ -7,10 +7,10 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from distrohop.windows import disks
-from distrohop.windows.esp import MountedEsp, scan_esp
-from distrohop.windows.nvram import snapshot_from_raw
-from distrohop.windows.runner import FakeRunner, ReadOnlyRunner
+from distrorelay.windows import disks
+from distrorelay.windows.esp import MountedEsp, scan_esp
+from distrorelay.windows.nvram import snapshot_from_raw
+from distrorelay.windows.runner import FakeRunner, ReadOnlyRunner
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -31,7 +31,7 @@ def laptop_inventory() -> disks.DiskInventory:
 
 def add_partition(inventory: disks.DiskInventory, number: int, gpt_type: str, guid: str, size: int = 50 * 2**30):
     """Tambahkan partisi sintetis setelah partisi terakhir di disk 0."""
-    from distrohop.windows import gpt_types
+    from distrorelay.windows import gpt_types
 
     info = gpt_types.lookup(gpt_type)
     last = inventory.partitions_on(0)[-1]
@@ -244,7 +244,7 @@ class FakeBcd:
     """
 
     def __init__(self, bcdedit_text: str, bitlocker: str = None, signature: str = VALID_SIGNATURE):
-        from distrohop.windows.bootentries import BOOTMGR_ID, parse_firmware
+        from distrorelay.windows.bootentries import BOOTMGR_ID, parse_firmware
 
         config = parse_firmware(bcdedit_text)
         self.bootmgr = BOOTMGR_ID
@@ -270,7 +270,7 @@ class FakeBcd:
 
     # --- Runner ---
     def run(self, args, *, timeout=120):
-        from distrohop.windows.runner import CommandResult, command_key, decode_powershell
+        from distrorelay.windows.runner import CommandResult, command_key, decode_powershell
 
         args = tuple(args)
         self.calls.append(args)
@@ -352,8 +352,8 @@ class FakeBcd:
 
 def laptop_world(tmp_path: Path):
     """Laptop simulasi: bcdedit asli dari fixture, ESP dengan layout asli, partisi #5 = ext4 /boot Fedora."""
-    from distrohop.windows.runner import ReadOnlyRunner
-    from distrohop.windows.scanner import ScanDeps
+    from distrorelay.windows.runner import ReadOnlyRunner
+    from distrorelay.windows.scanner import ScanDeps
 
     bcd = FakeBcd(fixture_text("bcdedit_firmware_laptop.txt"))
     esp_root = tmp_path / "esp"
@@ -382,7 +382,7 @@ def fake_mount(root: Path):
 
 def scan_deps(esp_root: Path, admin: bool = True, files=None, bitlocker: str = BITLOCKER_ON):
     """ScanDeps palsu: FakeRunner + ESP di folder temp + NVRAM/superblock sintetis."""
-    from distrohop.windows.scanner import ScanDeps
+    from distrorelay.windows.scanner import ScanDeps
 
     fake = FakeRunner()
     fake.add("ps:disks", fixture_text("disks_laptop.json"))

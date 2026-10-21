@@ -6,9 +6,9 @@ Layout ESP meniru hasil scan, tapi isi filenya sintetis.
 
 import json
 
-from distrohop.windows import nvram
-from distrohop.windows.bootentries import merge_entries, parse_firmware
-from distrohop.windows.bootrefs import (
+from distrorelay.windows import nvram
+from distrorelay.windows.bootentries import merge_entries, parse_firmware
+from distrorelay.windows.bootrefs import (
     VERDICT_LEFTOVER,
     VERDICT_NOT_TARGET,
     VERDICT_UNSURE,
@@ -17,8 +17,8 @@ from distrohop.windows.bootrefs import (
     grub_embedded,
     split_grub_prefix,
 )
-from distrohop.windows import gpt_types
-from distrohop.windows.fsprobe import FsInfo
+from distrorelay.windows import gpt_types
+from distrorelay.windows.fsprobe import FsInfo
 from helpers import (
     LAPTOP_BOOT_UUID,
     add_partition,

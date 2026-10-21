@@ -20,7 +20,7 @@ def is_admin() -> bool:
 
 
 def relaunch_as_admin(args: Sequence[str]) -> bool:
-    """Jalankan ulang `python -m distrohop <args>` lewat UAC. True kalau jendela baru berhasil dibuka."""
+    """Jalankan ulang `python -m distrorelay <args>` lewat UAC. True kalau jendela baru berhasil dibuka."""
     import ctypes
     from ctypes import wintypes
 
@@ -34,7 +34,7 @@ def relaunch_as_admin(args: Sequence[str]) -> bool:
         ctypes.c_int,
     ]
     shell_execute.restype = ctypes.c_void_p
-    params = subprocess.list2cmdline(["-m", "distrohop", *args])
+    params = subprocess.list2cmdline(["-m", "distrorelay", *args])
     result = shell_execute(None, "runas", sys.executable, params, os.getcwd(), 1)
     # Nilai > 32 berarti sukses; 5 berarti user menolak UAC.
     return (result or 0) > 32

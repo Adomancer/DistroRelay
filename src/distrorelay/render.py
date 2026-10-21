@@ -240,7 +240,7 @@ def candidates_text(analysis) -> Text:
             text.append(f"      {comp.ref:<28} {comp.label}\n", style="dim")
     text.append(
         "\nPilih dengan --select <key instalasi atau ref komponen>, boleh diulang. "
-        "Contoh: distrohop plan --select efi:fedora --select efi:arch\n"
+        "Contoh: distrorelay plan --select efi:fedora --select efi:arch\n"
     )
     return text
 
@@ -305,16 +305,20 @@ def journal_text(sessions) -> Text:
     if not sessions:
         text.append("  Belum ada.\n", style="dim")
     for s in sessions:
-        if not s.finished and s.resolved_by:
-            status, style = f"terputus, dituntaskan oleh sesi {s.resolved_by}", "dim"
-        elif not s.finished:
+        if not s.finished:
             status, style = "TERPUTUS", "bold yellow"
         elif s.ok:
             status, style = "selesai", "green"
+        elif s.end_message.startswith(("Dihentikan", "Jendela ditutup")):
+            status, style = "dihentikan", "yellow"
         else:
             status, style = "berhenti karena gagal", "red"
+        if s.resolved_by:
+            status, style = f"{status}, dituntaskan oleh sesi {s.resolved_by}", "dim"
         text.append(f"  {s.path.stem}  ", style="bold")
         text.append(f"{status}\n", style=style)
+        if s.finished and not s.ok and s.end_message:
+            text.append(f"      {s.end_message}\n", style="dim")
         if s.backup:
             text.append(f"      Backup: {s.backup}\n", style="dim")
         if s.post_check_ok is not None:
@@ -332,7 +336,7 @@ def info_text(report: ScanReport, log_path: str | None = None) -> Text:
     text = Text()
     text.append("Status\n", style="bold")
     text.append(f"  Hak Administrator: {'ya' if report.is_admin else 'TIDAK (scan terbatas)'}\n")
-    text.append(f"  Waktu scan: {report.created_at} · DistroHop {report.version}\n")
+    text.append(f"  Waktu scan: {report.created_at} · DistroRelay {report.version}\n")
     text.append(f"  Windows: {report.windows}\n")
     if report.inventory is not None:
         text.append(f"  Sidik jari layout disk: {report.inventory.fingerprint()[:16]}…\n", style="dim")

@@ -30,21 +30,22 @@ import sys
 import uuid
 from pathlib import Path
 
-from distrohop.windows import flush, gpt_types
-from distrohop.windows.disks import MIB, DiskInventory, load_inventory
-from distrohop.windows.elevate import is_admin
-from distrohop.windows.esp import mounted_esp
-from distrohop.windows.fsprobe import probe_bytes
-from distrohop.windows.runner import SubprocessRunner, powershell_args
+from distrorelay.windows import flush, gpt_types
+from distrorelay.windows.disks import MIB, DiskInventory, load_inventory
+from distrorelay.windows.elevate import is_admin
+from distrorelay.windows.esp import mounted_esp
+from distrorelay.windows.fsprobe import probe_bytes
+from distrorelay.windows.machine import detect_machine
+from distrorelay.windows.runner import SubprocessRunner, powershell_args
 
 GIB = 1024 * MIB
 BOOT_SIZE = 2 * GIB
 HEAD_SIZE = 128 * 1024
 BOOT_UUID = "d15f0b00-7e57-4c0f-9a11-000000000005"  # filesystem /boot Fedora palsu (partisi #5)
 ARCH_ROOT_UUID = "a7c40000-7e57-4000-8000-000000000007"  # root Arch yang "sudah di-wipe"
-RECORD_DIR = Path(r"C:\DistroHopVM")
+RECORD_DIR = Path(r"C:\DistroRelayVM")
 
-FAKE_SHIM = b"MZ DistroHop VM: fake UEFI SHIM signed by Microsoft Corporation UEFI CA 2011 (bukan program)"
+FAKE_SHIM = b"MZ DistroRelay VM: fake UEFI SHIM signed by Microsoft Corporation UEFI CA 2011 (bukan program)"
 FEDORA_CSV = "\ufeffshimx64.efi,Fedora,,This is the boot entry for Fedora\n".encode("utf-16-le")
 ENTRIES = [("Fedora", r"\EFI\fedora\shimx64.efi"), ("Arch", r"\EFI\Arch\grubx64.efi")]
 FALLBACK = r"EFI\Boot\bootx64.efi"
@@ -64,7 +65,7 @@ def grub_core_image(prefix: str) -> bytes:
     payload += b"\x00" * (-len(payload) % 8)
     module = struct.pack("<II", 3, 8 + len(payload)) + payload
     info = struct.pack("<IIQQ", 0x676D696D, 0, 24, 24 + len(module))
-    return b"MZ DistroHop VM: fake GNU GRUB core (bukan program)" + bytes(64) + info + module
+    return b"MZ DistroRelay VM: fake GNU GRUB core (bukan program)" + bytes(64) + info + module
 
 
 def ext4_head(fs_uuid: str = BOOT_UUID, last_mounted: str = "/boot") -> bytes:
@@ -83,12 +84,12 @@ def esp_files(boot_uuid: str = BOOT_UUID) -> dict[str, bytes]:
     """File yang ditulis ke ESP (path relatif ESP). EFI\\Boot\\bootx64.efi ditimpa, sisanya file baru."""
     files: dict[str, bytes | str] = {
         FALLBACK: FAKE_SHIM,
-        "EFI\\Boot\\BOOTIA32.EFI": b"MZ DistroHop VM: fake UEFI SHIM ia32",
-        "EFI\\Boot\\fbx64.efi": b"MZ DistroHop VM: fake shim fallback",
+        "EFI\\Boot\\BOOTIA32.EFI": b"MZ DistroRelay VM: fake UEFI SHIM ia32",
+        "EFI\\Boot\\fbx64.efi": b"MZ DistroRelay VM: fake shim fallback",
         "EFI\\fedora\\shimx64.efi": FAKE_SHIM,
-        "EFI\\fedora\\shimia32.efi": b"MZ DistroHop VM: fake UEFI SHIM ia32",
-        "EFI\\fedora\\grubx64.efi": b"MZ DistroHop VM: fake GNU GRUB signed",
-        "EFI\\fedora\\mmx64.efi": b"MZ DistroHop VM: fake MokManager",
+        "EFI\\fedora\\shimia32.efi": b"MZ DistroRelay VM: fake UEFI SHIM ia32",
+        "EFI\\fedora\\grubx64.efi": b"MZ DistroRelay VM: fake GNU GRUB signed",
+        "EFI\\fedora\\mmx64.efi": b"MZ DistroRelay VM: fake MokManager",
         "EFI\\fedora\\BOOTX64.CSV": FEDORA_CSV,
         "EFI\\fedora\\grub.cfg": f"search --no-floppy --root-dev-only --fs-uuid --set=dev {boot_uuid}\n"
         "set prefix=($dev)/grub2\nexport $prefix\nconfigfile $prefix/grub.cfg\n",
@@ -97,11 +98,11 @@ def esp_files(boot_uuid: str = BOOT_UUID) -> dict[str, bytes]:
         f"  search --no-floppy --fs-uuid --set=root {ARCH_ROOT_UUID}\n"
         f"  linux /vmlinuz-linux root=UUID={ARCH_ROOT_UUID} rw\n}}\n",
         "grub\\grubenv": "# GRUB Environment Block\n" + "#" * 999,
-        "grub\\x86_64-efi\\normal.mod": b"DistroHop VM: fake GRUB module",
+        "grub\\x86_64-efi\\normal.mod": b"DistroRelay VM: fake GRUB module",
         "grub\\x86_64-efi\\core.efi": grub_core_image("(,gpt1)/grub"),
-        "grub\\locale\\id.mo": b"DistroHop VM: fake locale",
-        "EFI\\HP\\BIOS\\Current\\FAKE.bin": b"DistroHop VM: fake HP BIOS image",
-        "EFI\\HP\\SystemDiags\\SysDiags.efi": b"MZ DistroHop VM: fake HP diagnostics",
+        "grub\\locale\\id.mo": b"DistroRelay VM: fake locale",
+        "EFI\\HP\\BIOS\\Current\\FAKE.bin": b"DistroRelay VM: fake HP BIOS image",
+        "EFI\\HP\\SystemDiags\\SysDiags.efi": b"MZ DistroRelay VM: fake HP diagnostics",
         "mach_kernel": b"x" * 34,
         "System\\Library\\CoreServices\\SystemVersion.plist": "<plist/>",
     }
@@ -126,11 +127,10 @@ def run_bcdedit(runner: SubprocessRunner, *args: str) -> str:
 
 
 def check_is_vm(runner: SubprocessRunner) -> str:
-    info = json.loads(run_ps(runner, "Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model | ConvertTo-Json"))
-    text = f"{info.get('Manufacturer') or ''} {info.get('Model') or ''}".strip()
-    if not any(mark in text.lower() for mark in ("virtualbox", "innotek", "vmware")):
-        raise SetupError(f"Ini bukan VM ({text}). Script ini hanya boleh dijalankan di VirtualBox/VMware.")
-    return text
+    machine = detect_machine(runner)
+    if not machine.is_vm:
+        raise SetupError(f"Ini bukan VM ({machine.description}). Script ini hanya boleh dijalankan di mesin virtual.")
+    return machine.description
 
 
 def boot_partition_slot(inventory: DiskInventory, disk_number: int) -> int:
@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         if slot is not None:
             print(f"  - partisi 2 GB tipe XBOOTLDR di disk {esp.disk_number}, offset {slot:,}, header ext4 '/boot'")
         print("  - EFI\\fedora, EFI\\Arch, grub\\, EFI\\HP, mach_kernel, System\\ di ESP")
-        print("  - EFI\\Boot\\bootx64.efi ditimpa shim palsu (aslinya disimpan di C:\\DistroHopVM)")
+        print("  - EFI\\Boot\\bootx64.efi ditimpa shim palsu (aslinya disimpan di C:\\DistroRelayVM)")
         print("  - entri boot 'Fedora' dan 'Arch' di urutan pertama")
         print("  - disk kosong kedua (kalau ada) di-format NTFS untuk backup")
         if input("Ketik BUAT untuk lanjut: ").strip() != "BUAT":
@@ -277,8 +277,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print("\nSelesai. Ambil snapshot VM sekarang (mis. 'sisa-palsu'), lalu jalankan:")
-    print("  .venv\\Scripts\\python.exe -m distrohop scan")
-    print("  .venv\\Scripts\\python.exe -m distrohop plan")
+    print("  .venv\\Scripts\\python.exe -m distrorelay scan")
+    print("  .venv\\Scripts\\python.exe -m distrorelay plan")
     return 0
 
 

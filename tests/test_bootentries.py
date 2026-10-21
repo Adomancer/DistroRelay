@@ -1,7 +1,7 @@
 import json
 
-from distrohop.windows.bootentries import BOOTMGR_ID, merge_entries, parse_firmware
-from distrohop.windows.nvram import parse_load_option, snapshot_from_raw
+from distrorelay.windows.bootentries import BOOTMGR_ID, merge_entries, parse_firmware
+from distrorelay.windows.nvram import parse_load_option, snapshot_from_raw
 from helpers import ESP_GUID, WINDOWS_BCD, fixture_text, nvram_raw_laptop
 
 FEDORA_BCD = "{0b5f2d1e-7a39-11ef-9a6b-806e6f6e6963}"

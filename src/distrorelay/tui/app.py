@@ -17,8 +17,8 @@ from ..paths import reports_dir
 from ..windows.scanner import ScanReport, report_to_json, run_scan
 
 
-class DistroHopApp(App):
-    TITLE = "DistroHop"
+class DistroRelayApp(App):
+    TITLE = "DistroRelay"
     SUB_TITLE = "Scan read-only: tidak ada yang diubah"
     CSS = """
     #status { height: auto; padding: 0 1; background: $boost; }
@@ -125,5 +125,5 @@ def _fill_table(table: DataTable, columns: tuple[str, ...], rows: list[tuple[Tex
 
 
 def run_tui(log_path: str | None = None) -> int:
-    DistroHopApp(log_path).run()
+    DistroRelayApp(log_path).run()
     return 0

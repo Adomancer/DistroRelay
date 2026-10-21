@@ -1,7 +1,7 @@
 """Baca entri boot langsung dari NVRAM UEFI dan parse EFI_LOAD_OPTION.
 
 Hanya MEMBACA (GetFirmwareEnvironmentVariableW). Modul ini sengaja tidak punya fungsi tulis:
-perubahan entri boot di DistroHop selalu lewat bcdedit.
+perubahan entri boot di DistroRelay selalu lewat bcdedit.
 """
 
 from __future__ import annotations

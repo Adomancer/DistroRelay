@@ -1,4 +1,4 @@
-"""Eksekusi rencana uninstall (M2b). INI satu-satunya modul DistroHop yang menghapus sesuatu.
+"""Eksekusi rencana uninstall (M2b). INI satu-satunya modul DistroRelay yang menghapus sesuatu.
 
 Pengaman berlapis:
 1. Gerbang (`check_gate`): preflight lolos, konfirmasi manual sudah diberikan, dan backup lokal + salinan di
@@ -35,13 +35,14 @@ from .preflight import FAIL, PreflightResult
 from .runner import AllowListRunner, Runner, powershell_args
 from .scanner import ScanReport
 from .signature import Signature, check_signature
+from .stopping import StopSignal
 from .uninstall_plan import PlannedAction, UninstallPlan
 
 log = logging.getLogger(__name__)
 
-# Simulasi crash untuk skenario VM 7. Hanya aktif kalau DISTROHOP_DEV=1 juga di-set.
-DEV_FLAG_ENV = "DISTROHOP_DEV"
-FAIL_AFTER_ENV = "DISTROHOP_FAIL_AFTER"
+# Simulasi crash untuk skenario VM 7. Hanya aktif kalau DISTRORELAY_DEV=1 juga di-set.
+DEV_FLAG_ENV = "DISTRORELAY_DEV"
+FAIL_AFTER_ENV = "DISTRORELAY_FAIL_AFTER"
 
 SET_WINDOWS_FIRST = ["bcdedit", "/set", "{fwbootmgr}", "displayorder", "{bootmgr}", "/addfirst"]
 BOOTMGFW = "EFI\\Microsoft\\Boot\\bootmgfw.efi"
@@ -68,7 +69,7 @@ WELL_KNOWN_IDS = frozenset(
     }
 )
 
-BITLOCKER_SUSPEND_SCRIPT = r"""# distrohop:suspend-bitlocker
+BITLOCKER_SUSPEND_SCRIPT = r"""# distrorelay:suspend-bitlocker
 $ErrorActionPreference = 'Stop'
 $null = Suspend-BitLocker -MountPoint 'C:' -RebootCount 1
 """
@@ -177,6 +178,7 @@ class ExecutionResult:
     steps: list[StepResult] = field(default_factory=list)
     completed: bool = False
     stopped: str | None = None
+    stopped_by_user: bool = False
 
 
 @dataclass
@@ -233,7 +235,7 @@ def _restore_fallback(action: PlannedAction, ctx: _Context) -> str:
         if ctx.hashes.get(rel.lower()) != sha256_file(target):
             raise ExecutionError(f"{rel} berubah sejak backup dibuat; buat backup baru dulu")
     source_hash = sha256_file(source)
-    temporary = target.with_name(target.name + ".distrohop-baru")
+    temporary = target.with_name(target.name + ".distrorelay-baru")
     shutil.copyfile(source, temporary)
     if sha256_file(temporary) != source_hash:
         temporary.unlink()
@@ -343,8 +345,10 @@ def execute_plan(
     flush_volume: Callable[[Path], None] = flush.flush_volume,
     progress: Callable[[str], None] | None = None,
     fail_after: str | None = None,
+    stop: StopSignal | None = None,
 ) -> ExecutionResult:
     say = progress or (lambda message: None)
+    stop = stop or StopSignal()
     actions = list(plan.actions)
     if suspend_bitlocker:
         actions.insert(
@@ -359,25 +363,40 @@ def execute_plan(
     result = ExecutionResult(session=journal.path.stem, journal_path=str(journal.path))
 
     for number, action in enumerate(actions, 1):
-        say(f"[{number}/{len(actions)}] {action.title}…")
-        handler = _HANDLERS.get(action.kind)
-        journal.record(number, action.kind, action.ref, "started")
-        try:
-            if handler is None:
-                raise ExecutionError(f"Jenis aksi tidak dikenal: {action.kind}")
-            message = handler(action, ctx)
-        except Exception as exc:  # gagal = berhenti, apa pun penyebabnya
-            log.exception("Langkah %s (%s) gagal", number, action.kind)
-            text = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ExecutionError) else str(exc)
-            journal.record(number, action.kind, action.ref, "failed", text)
-            result.steps.append(StepResult(number, action.kind, action.title, False, text))
-            result.stopped = f"Berhenti di langkah {number} ({action.title}): {text}"
+        # Permintaan berhenti (Ctrl+C, jendela ditutup) hanya berlaku di antara langkah. Urutan aksinya dirancang
+        # supaya setiap titik di antara langkah tetap bisa boot ke Windows.
+        if stop.requested():
+            done = number - 1
+            result.stopped = (
+                f"{stop.reason} setelah langkah {done} dari {len(actions)}; langkah {number} dan sesudahnya belum dijalankan"
+                if done else f"{stop.reason} sebelum langkah pertama; tidak ada yang diubah"
+            )
+            result.stopped_by_user = True
             journal.finish(False, result.stopped)
             return result
-        if fail_after and fail_after in (str(number), action.kind):
-            raise SimulatedCrash(f"Simulasi crash setelah langkah {number} ({action.kind}), sebelum dicatat selesai")
-        journal.record(number, action.kind, action.ref, "done", message)
-        result.steps.append(StepResult(number, action.kind, action.title, True, message))
+        say(f"[{number}/{len(actions)}] {action.title}…")
+        handler = _HANDLERS.get(action.kind)
+        stop.step_started()
+        try:
+            journal.record(number, action.kind, action.ref, "started")
+            try:
+                if handler is None:
+                    raise ExecutionError(f"Jenis aksi tidak dikenal: {action.kind}")
+                message = handler(action, ctx)
+            except Exception as exc:  # gagal = berhenti, apa pun penyebabnya
+                log.exception("Langkah %s (%s) gagal", number, action.kind)
+                text = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ExecutionError) else str(exc)
+                journal.record(number, action.kind, action.ref, "failed", text)
+                result.steps.append(StepResult(number, action.kind, action.title, False, text))
+                result.stopped = f"Berhenti di langkah {number} ({action.title}): {text}"
+                journal.finish(False, result.stopped)
+                return result
+            if fail_after and fail_after in (str(number), action.kind):
+                raise SimulatedCrash(f"Simulasi crash setelah langkah {number} ({action.kind}), sebelum dicatat selesai")
+            journal.record(number, action.kind, action.ref, "done", message)
+            result.steps.append(StepResult(number, action.kind, action.title, True, message))
+        finally:
+            stop.step_finished()
 
     result.completed = True
     journal.finish(True, "Semua langkah selesai")
@@ -443,7 +462,7 @@ def check_gate(
     if not manifest.get("usb_copy"):
         problems.append("Backup ini dibuat dengan --local-only. Eksekusi butuh backup yang punya salinan di drive eksternal")
     else:
-        candidates = [Path(root) / "DistroHop" / "backups" / backup_id for root in external_roots]
+        candidates = [Path(root) / "DistroRelay" / "backups" / backup_id for root in external_roots]
         external = next((c for c in candidates if (c / "manifest.json").exists()), None)
         if external is None:
             problems.append("Salinan backup di drive eksternal tidak ditemukan; colok drive tempat backup ini disalin")

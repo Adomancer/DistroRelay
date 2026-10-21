@@ -1,7 +1,7 @@
 """Backup per lapisan (M2a), sebelum apa pun diubah.
 
 Lapisan: file ESP (esp.zip), BCD store (bcdedit /export), entri firmware (teks + JSON), NVRAM mentah,
-dan metadata GPT. Semua disimpan di %LOCALAPPDATA%\\DistroHop\\backups\\<id>\\, disalin ke USB
+dan metadata GPT. Semua disimpan di %LOCALAPPDATA%\\DistroRelay\\backups\\<id>\\, disalin ke USB
 (ditambah folder esp\\ biasa yang bisa di-xcopy dari WinRE), lalu diverifikasi dengan dibaca ulang.
 
 Sengaja TIDAK disamarkan: NVRAM mentah dan daftar file ini adalah backup milik kamu sendiri,
@@ -247,7 +247,7 @@ def create_backup(
         for name in ("esp.zip", *bcd_files, "firmware-entries.txt", "firmware-entries.json", "nvram-raw.json", "partitions.json")
     ]
     manifest = {
-        "distrohop": __version__,
+        "distrorelay": __version__,
         "backup_id": backup_id,
         "created_at": (now or datetime.now()).astimezone().isoformat(timespec="seconds"),
         "layout_fingerprint": report.inventory.fingerprint(),
@@ -273,7 +273,7 @@ def create_backup(
 
     # bcdedit /store me-load file sebagai registry hive dan memperbarui header-nya, jadi yang dibaca
     # adalah salinan sementara. File backup itu sendiri tidak boleh berubah setelah hash-nya dicatat.
-    with tempfile.TemporaryDirectory(prefix="distrohop-bcd-", ignore_cleanup_errors=True) as scratch:
+    with tempfile.TemporaryDirectory(prefix="distrorelay-bcd-", ignore_cleanup_errors=True) as scratch:
         for name in bcd_files:
             shutil.copy2(local / name, Path(scratch) / name)
         store = runner.run(["bcdedit", "/store", str(Path(scratch) / "bcd-store.bak"), "/enum", "all"])
@@ -294,7 +294,7 @@ def create_backup(
 
     if usb_root is not None:
         say(f"Menyalin backup ke drive eksternal {usb_root}…")
-        usb = Path(usb_root) / "DistroHop" / "backups" / backup_id
+        usb = Path(usb_root) / "DistroRelay" / "backups" / backup_id
         try:
             usb.mkdir(parents=True, exist_ok=False)
             for name in [f.name for f in result.files] + ["manifest.json"]:

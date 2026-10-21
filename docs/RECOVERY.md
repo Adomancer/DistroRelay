@@ -1,4 +1,4 @@
-# Prosedur darurat DistroHop
+# Prosedur darurat DistroRelay
 
 Pakai dokumen ini kalau setelah uninstall laptop **tidak bisa boot ke Windows**, atau ada yang terhapus keliru.
 Latih dulu prosedur ini di VM (skenario 8 di `tests/vm/SCENARIOS.md`) sebelum menjalankan uninstall di laptop asli.
@@ -7,7 +7,7 @@ Latih dulu prosedur ini di VM (skenario 8 di `tests/vm/SCENARIOS.md`) sebelum me
 
 - **USB darurat Windows**: USB installer biasa, atau Ventoy berisi ISO Windows. Sudah dicoba boot sampai Command Prompt.
 - **Recovery key BitLocker** dari akun Microsoft, kalau Device Encryption aktif.
-- **Backup DistroHop** di drive eksternal (flashdisk atau HDD eksternal): `<drive>:\DistroHop\backups\<id>\`.
+- **Backup DistroRelay** di drive eksternal (flashdisk atau HDD eksternal): `<drive>:\DistroRelay\backups\<id>\`.
   Drive ini **berbeda** dari USB darurat: HDD berisi backup tidak bisa dipakai untuk boot.
 
 Isi folder backup:
@@ -58,13 +58,13 @@ Isi folder backup:
    Setelah Windows menyala, buka Command Prompt (Administrator) dan jalankan `bcdboot C:\Windows` supaya entrinya dibuat.
 3. Alternatif: kembalikan isi ESP dari backup (`U:` = huruf drive backup di WinRE; colok HDD-nya dulu, lalu cek lewat `list vol`):
    ```
-   xcopy U:\DistroHop\backups\<id>\esp S:\ /e /h /k /y
+   xcopy U:\DistroRelay\backups\<id>\esp S:\ /e /h /k /y
    ```
 
 ## B. BCD store rusak
 
 ```
-bcdedit /import U:\DistroHop\backups\<id>\bcd-store.bak
+bcdedit /import U:\DistroRelay\backups\<id>\bcd-store.bak
 ```
 Atau bangun ulang dengan bagian A langkah 1.
 
@@ -75,7 +75,7 @@ Atau bangun ulang dengan bagian A langkah 1.
   bcdedit /set {fwbootmgr} displayorder {bootmgr} /addfirst
   ```
   Kalau entrinya hilang sama sekali: `bcdboot C:\Windows` (bagian A).
-- **Entri Linux terhapus keliru**: pakai menu Pulihkan di DistroHop (M2b). Alternatifnya, tambah lewat menu firmware
+- **Entri Linux terhapus keliru**: pakai menu Pulihkan di DistroRelay (M2b). Alternatifnya, tambah lewat menu firmware
   ("Add boot option", arahkan ke file `.efi` dari `firmware-entries.txt`), atau dari Linux live USB:
   ```
   efibootmgr -c -d /dev/nvme0n1 -p 1 -L Fedora -l '\EFI\fedora\shimx64.efi'
@@ -88,4 +88,4 @@ Selama ruang bekasnya **belum dipakai** (belum diisi distro baru), partisi bisa 
 ```powershell
 New-Partition -DiskNumber 0 -Offset <Offset> -Size <Size> -GptType '{<GptType>}'
 ```
-PARTUUID-nya akan berbeda, tapi UUID filesystem dan isinya tetap sama. Menu Pulihkan di DistroHop melakukan ini otomatis (M3).
+PARTUUID-nya akan berbeda, tapi UUID filesystem dan isinya tetap sama. Menu Pulihkan di DistroRelay melakukan ini otomatis (M3).

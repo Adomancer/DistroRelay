@@ -1,8 +1,8 @@
 """Skenario reference graph di ESP palsu (folder temp). Tidak menyentuh firmware atau disk asli."""
 
-from distrohop.windows import gpt_types
-from distrohop.windows.bootentries import merge_entries
-from distrohop.windows.bootrefs import (
+from distrorelay.windows import gpt_types
+from distrorelay.windows.bootentries import merge_entries
+from distrorelay.windows.bootrefs import (
     VERDICT_IN_USE,
     VERDICT_LEFTOVER,
     VERDICT_NOT_TARGET,
@@ -13,8 +13,8 @@ from distrohop.windows.bootrefs import (
     parse_boot_csv,
     refs_from_grub_cfg,
 )
-from distrohop.windows.fsprobe import FsInfo
-from distrohop.windows.nvram import snapshot_from_raw
+from distrorelay.windows.fsprobe import FsInfo
+from distrorelay.windows.nvram import snapshot_from_raw
 from helpers import (
     BOOT_UUID,
     BOOTMGFW,

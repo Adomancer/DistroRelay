@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .runner import Runner, powershell_args
 
-SIGNATURE_SCRIPT = r"""# distrohop:authenticode
+SIGNATURE_SCRIPT = r"""# distrorelay:authenticode
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $s = Get-AuthenticodeSignature -LiteralPath '__PATH__'

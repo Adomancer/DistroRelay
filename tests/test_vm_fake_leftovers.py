@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from distrohop.windows.bootrefs import VERDICT_LEFTOVER, VERDICT_NOT_TARGET, analyze, collect_esp_refs
-from distrohop.windows.disks import MIB
-from distrohop.windows.fsprobe import FsInfo, probe_bytes
-from distrohop.windows.runner import CommandResult
+from distrorelay.windows.bootrefs import VERDICT_LEFTOVER, VERDICT_NOT_TARGET, analyze, collect_esp_refs
+from distrorelay.windows.disks import MIB
+from distrorelay.windows.fsprobe import FsInfo, probe_bytes
+from distrorelay.windows.runner import CommandResult
 from helpers import BOOTMGFW, fake_esp, laptop_inventory
 from test_laptop_real import by_key, real_entries
 

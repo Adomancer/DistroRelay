@@ -1,4 +1,4 @@
-﻿# DistroHop
+﻿# DistroRelay
 
 Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → uninstall bersih → install distro baru → setup otomatis**, dengan Windows sebagai pusat kendali.
 
@@ -44,42 +44,44 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
 
 # Dashboard (otomatis meminta hak Administrator lewat UAC)
-.venv\Scripts\python.exe -m distrohop
+.venv\Scripts\python.exe -m distrorelay
 
 # Ringkasan di terminal + laporan JSON
-.venv\Scripts\python.exe -m distrohop scan --json scan-output\laporan.scan.json
+.venv\Scripts\python.exe -m distrorelay scan --json scan-output\laporan.scan.json
 
 # Scan terbatas tanpa admin (hanya daftar partisi)
-.venv\Scripts\python.exe -m distrohop --no-elevate scan
+.venv\Scripts\python.exe -m distrorelay --no-elevate scan
 
 # Dry-run rencana uninstall: tanpa --select tampilkan kandidat, dengan --select tampilkan urutan & perintah persis
-.venv\Scripts\python.exe -m distrohop plan
-.venv\Scripts\python.exe -m distrohop plan --select efi:fedora --select efi:arch
+.venv\Scripts\python.exe -m distrorelay plan
+.venv\Scripts\python.exe -m distrorelay plan --select efi:fedora --select efi:arch
 
-# Preflight + backup per lapisan ke %LOCALAPPDATA%\DistroHop\backups\ dan drive eksternal
+# Preflight + backup per lapisan ke %LOCALAPPDATA%\DistroRelay\backups\ dan drive eksternal
 # (flashdisk atau HDD eksternal, disk fisik selain SSD Windows), lalu verifikasi
-.venv\Scripts\python.exe -m distrohop backup --drive E
+.venv\Scripts\python.exe -m distrorelay backup --drive E
 
 # Mode coba tanpa USB (backup hanya di C:; belum memenuhi syarat eksekusi M2b)
-.venv\Scripts\python.exe -m distrohop backup --local-only
+.venv\Scripts\python.exe -m distrorelay backup --local-only
 
 # Verifikasi ulang folder backup kapan saja (tidak butuh admin)
-.venv\Scripts\python.exe -m distrohop verify-backup E:\DistroHop\backups\<id>
+.venv\Scripts\python.exe -m distrorelay verify-backup E:\DistroRelay\backups\<id>
 
 # --- Mengubah sistem: coba di VM dulu ---
-# Jalankan rencana (banyak konfirmasi, terakhir ketik HAPUS)
-.venv\Scripts\python.exe -m distrohop uninstall --select efi:fedora --backup <id>
+# Jalankan rencana (banyak konfirmasi, terakhir ketik HAPUS).
+# Ctrl+C saat berjalan = selesaikan langkah yang sedang jalan, lalu berhenti dengan rapi.
+# Mode "vm" hanya berlaku kalau komputernya memang terdeteksi VM; di mesin fisik selalu dianggap laptop asli.
+.venv\Scripts\python.exe -m distrorelay uninstall --select efi:fedora --backup <id>
 # Pulihkan folder ESP / entri boot dari backup
-.venv\Scripts\python.exe -m distrohop restore --backup <id> --esp-item EFI\fedora --boot-entry Fedora
+.venv\Scripts\python.exe -m distrorelay restore --backup <id> --esp-item EFI\fedora --boot-entry Fedora
 # Lihat sesi eksekusi, termasuk yang terputus di tengah
-.venv\Scripts\python.exe -m distrohop journal
+.venv\Scripts\python.exe -m distrorelay journal
 ```
 
 Rencana uninstall selalu berurutan supaya laptop tetap bisa boot ke Windows di setiap titik:
 Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
 
-Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroHop\reports\`, `q` keluar.
-Log ada di `%LOCALAPPDATA%\DistroHop\logs\`.
+Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroRelay\reports\`, `q` keluar.
+Log ada di `%LOCALAPPDATA%\DistroRelay\logs\`.
 
 ## Test
 
@@ -92,7 +94,7 @@ Test tidak menyentuh sistem: perintah memakai `FakeRunner`, ESP memakai folder s
 ## Struktur
 
 ```
-src/distrohop/
+src/distrorelay/
 ├─ __main__.py            CLI & elevasi admin
 ├─ render.py              tampilan bersama untuk CLI dan TUI
 ├─ tui/app.py             dashboard Textual

@@ -1,4 +1,4 @@
-"""Entry point: `python -m distrohop [scan]`."""
+"""Entry point: `python -m distrorelay [scan]`."""
 
 from __future__ import annotations
 
@@ -11,18 +11,18 @@ from pathlib import Path
 from . import __version__
 from .logging_setup import setup_logging
 
-log = logging.getLogger("distrohop")
+log = logging.getLogger("distrorelay")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="distrohop",
+        prog="distrorelay",
         description=(
             "Toolkit distro-hopping untuk dual-boot Windows + Linux. "
             "scan/plan/backup/verify-backup/journal hanya membaca; uninstall dan restore MENGUBAH sistem (coba di VM dulu)."
         ),
     )
-    parser.add_argument("--version", action="version", version=f"DistroHop {__version__}")
+    parser.add_argument("--version", action="version", version=f"DistroRelay {__version__}")
     parser.add_argument(
         "--no-elevate", action="store_true", help="jangan minta hak Administrator (scan jadi terbatas)"
     )
@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="mode coba: simpan hanya di C:, tanpa USB (belum memenuhi syarat eksekusi M2b)",
     )
     verify = commands.add_parser("verify-backup", help="verifikasi ulang folder backup terhadap manifest-nya")
-    verify.add_argument("directory", metavar="FOLDER", help="mis. E:\\DistroHop\\backups\\20261021-193000")
+    verify.add_argument("directory", metavar="FOLDER", help="mis. E:\\DistroRelay\\backups\\20261021-193000")
     uninstall = commands.add_parser(
         "uninstall", help="JALANKAN rencana uninstall (menghapus entri boot & folder ESP), dengan banyak konfirmasi"
     )
@@ -69,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# Perintah yang hanya membaca file DistroHop sendiri tidak perlu hak Administrator.
+# Perintah yang hanya membaca file DistroRelay sendiri tidak perlu hak Administrator.
 _NO_ADMIN_COMMANDS = {"verify-backup", "journal"}
 
 
@@ -96,7 +96,7 @@ def _run_scan_command(args: argparse.Namespace, log_path: Path | None) -> int:
     console = Console()
     with console.status("Scanning…") as status:
         report = run_scan(progress=lambda message: status.update(message))
-    console.print(render.to_rich_tree("DistroHop: hasil scan (read-only)", render.summary_nodes(report)))
+    console.print(render.to_rich_tree("DistroRelay: hasil scan (read-only)", render.summary_nodes(report)))
     console.print(render.info_text(report, str(log_path) if log_path else None))
     if args.json:
         json_path = Path(args.json)
@@ -109,11 +109,22 @@ def _run_scan_command(args: argparse.Namespace, log_path: Path | None) -> int:
     return 0 if all(i.severity != "error" for i in report.issues) else 1
 
 
-def _scan_with_status(console):
+def _ask_word(prompt: str) -> str:
+    """Untuk kata konfirmasi (HAPUS, LANJUT, PULIHKAN): tidak di-strip, supaya spasi di depan tetap ditolak."""
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
+
+def _scan_with_status(console, flow=None):
     from .windows.scanner import run_scan
 
     with console.status("Scanning…") as status:
-        report = run_scan(progress=lambda message: status.update(message))
+        if flow is not None:
+            report = flow.scan(progress=lambda message: status.update(message))
+        else:
+            report = run_scan(progress=lambda message: status.update(message))
     for issue in report.issues:
         if issue.severity != "info":
             console.print(f"Scan: [{issue.step}] {issue.message}", style="yellow", markup=False, highlight=False)
@@ -222,123 +233,102 @@ def _run_journal_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_uninstall_command(args: argparse.Namespace) -> int:
-    import os
-    from datetime import datetime
-
+def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
     from rich.console import Console
 
     from . import render
-    from .windows import disks, esp, nvram
-    from .windows.backup import backup_runner, backups_root
-    from .windows.execute import (
-        DEV_FLAG_ENV,
-        FAIL_AFTER_ENV,
-        check_gate,
-        execute_plan,
-        execution_runner,
-    )
-    from .windows.journal import Journal, incomplete_sessions, journal_dir
-    from .windows.postcheck import post_check
-    from .windows.preflight import external_volumes, run_preflight
-    from .windows.runner import SubprocessRunner
-    from .windows.scanner import run_scan
-    from .windows.uninstall_plan import build_plan, expand_selection
+    from .windows.stopping import StopSignal, console_stop_guard
+    from .windows.workflow import CONTINUE_WORD, DELETE_WORD, UninstallFlow, default_deps
 
     console = Console()
-    unfinished = incomplete_sessions()
+    flow = flow or UninstallFlow(default_deps())
+    unfinished = flow.unfinished_sessions()
     if unfinished:
         console.print(render.journal_text(unfinished))
-        console.print("Ada sesi sebelumnya yang terputus di tengah. Periksa dulu kondisinya (scan ulang).", style="bold yellow")
-        if _ask("Tetap lanjut? Ketik LANJUT: ") != "LANJUT":
+        console.print(
+            "Ada sesi sebelumnya yang belum tuntas (terputus, dihentikan, atau gagal), jadi sistem mungkin "
+            "setengah jadi. Periksa dulu kondisinya (scan ulang).",
+            style="bold yellow",
+        )
+        if not flow.acknowledge_unfinished(_ask_word(f"Tetap lanjut? Ketik {CONTINUE_WORD}: ")):
             return 1
     if not args.backup:
-        available = sorted(p.name for p in backups_root().glob("*") if (p / "manifest.json").exists())
+        available = sorted(p.name for p in flow.deps.backups_root.glob("*") if (p / "manifest.json").exists())
         console.print(f"Wajib --backup <ID>. Backup yang ada: {', '.join(available) or '-'}", style="red")
         return 1
     if not args.select:
-        console.print("Wajib --select (lihat kandidat dengan `distrohop plan`).", style="red")
+        console.print("Wajib --select (lihat kandidat dengan `distrorelay plan`).", style="red")
         return 1
 
     # Syarat proses dari plan yang tidak bisa dicek kode: test VM dan latihan prosedur darurat.
-    where = _ask("Ini dijalankan di VM (untuk test) atau di laptop asli? Ketik vm atau asli: ").lower()
-    if where not in ("vm", "asli"):
+    choice = _ask("Ini dijalankan di VM (untuk test) atau di laptop asli? Ketik vm atau asli: ").lower()
+    if choice not in ("vm", "asli"):
         console.print("Dibatalkan.")
         return 1
-    if where == "asli":
-        for question in (
-            "Semua skenario VM untuk M2b di tests/vm/SCENARIOS.md sudah lolos?",
-            "Sudah latihan prosedur docs/RECOVERY.md di VM (skenario 8)?",
-        ):
-            if _ask(f"{question} Ketik ya: ").lower() != "ya":
-                console.print("Selesaikan dulu di VM. Tidak ada yang diubah.", style="yellow")
-                return 1
-
-    report = _scan_with_status(console)
-    refs, unknown = expand_selection(report.analysis, args.select)
-    if unknown:
-        console.print(f"Tidak dikenal: {', '.join(unknown)}", style="red", markup=False)
+    decision = flow.decide_mode(choice)
+    if decision.forced_real:
+        console.print(
+            f"Komputer ini terdeteksi sebagai mesin fisik ({decision.machine.description}), bukan VM: "
+            "diperlakukan sebagai laptop asli.",
+            style="bold yellow",
+            markup=False,
+        )
+    answers = {}
+    for key, question in decision.statements.items():
+        answers[key] = _ask(f"{question} Ketik ya: ").lower() == "ya"
+        if not answers[key]:
+            break
+    if flow.set_mode(choice, answers):
+        console.print("Selesaikan dulu di VM. Tidak ada yang diubah.", style="yellow")
         return 1
-    plan = build_plan(report.analysis, report.boot_entries, refs)
+
+    report = _scan_with_status(console, flow)
+    plan = flow.select(args.select)
+    if flow.unknown:
+        console.print(f"Tidak dikenal: {', '.join(flow.unknown)}", style="red", markup=False)
+        return 1
     console.print(render.plan_text(plan))
 
-    preflight_runner = backup_runner(SubprocessRunner())
     with console.status("Preflight…"):
-        fresh, _ = disks.load_inventory(preflight_runner)
-        preflight = run_preflight(report, preflight_runner, fresh_inventory=fresh, mount_esp=esp.mounted_esp)
+        preflight = flow.run_preflight()
     console.print(render.preflight_text(preflight))
-
-    confirmed: set[str] = set()
     for check in preflight.needs_confirmation:
         console.print(f"\n{check.title}: {check.message}", style="bold yellow", markup=False)
-        if _ask("Sudah? Ketik ya: ").lower() == "ya":
-            confirmed.add(check.key)
+        flow.confirm(check.key, _ask("Sudah? Ketik ya: ").lower() == "ya")
 
-    external = [Path(f"{p.drive_letter}:\\") for p in external_volumes(report.inventory)]
+    flow.use_backup(args.backup)
     with console.status("Memverifikasi backup lokal & eksternal…"):
-        gate = check_gate(
-            plan, report, preflight, backup_id=args.backup, local_root=backups_root(), external_roots=external,
-            confirmed=confirmed,
-        )
+        gate = flow.gate()
     console.print(render.gate_text(gate))
     if not gate.ok:
         return 1
 
     console.print("\nIni akan MENGHAPUS entri boot dan folder ESP sesuai rencana di atas.", style="bold red")
-    if _ask("Ketik HAPUS untuk menjalankan, atau Enter untuk batal: ") != "HAPUS":
+    ticket = flow.authorize(_ask_word(f"Ketik {DELETE_WORD} untuk menjalankan, atau Enter untuk batal: "))
+    if ticket is None:
         console.print("Dibatalkan. Tidak ada yang diubah.")
         return 1
 
-    runner = execution_runner(SubprocessRunner(), plan)
-    session = datetime.now().strftime("%Y%m%d-%H%M%S")
-    journal = Journal.start(
-        journal_dir(),
-        session,
-        {"where": where, "backup": args.backup, "select": args.select, "actions": [a.title for a in plan.actions]},
-    )
-    fail_after = os.environ.get(FAIL_AFTER_ENV) if os.environ.get(DEV_FLAG_ENV) == "1" else None
-    with console.status("Menjalankan…") as status, esp.mounted_esp(runner, report.inventory.esp()) as mounted:
-        result = execute_plan(
-            plan,
-            runner=runner,
-            esp_root=mounted.root,
-            manifest=gate.manifest,
-            journal=journal,
-            suspend_bitlocker=any(v.needs_recovery_key for v in report.bitlocker or []),
-            read_nvram=nvram.read_nvram,
-            progress=lambda m: status.update(m),
-            fail_after=fail_after,
-        )
+    stop = StopSignal()
+    with console.status("Menjalankan… (Ctrl+C = berhenti setelah langkah yang sedang jalan)") as status, \
+            console_stop_guard(stop, notify=lambda m: status.update(m)):
+        result = flow.execute(ticket, progress=lambda m: status.update(m), stop=stop)
     console.print(render.execution_text(result))
+    if result.stopped_by_user:
+        console.print(
+            "\nDihentikan dengan rapi: langkah yang sudah jalan tetap berlaku, sisanya belum dijalankan, dan Windows "
+            "tetap bisa boot. Untuk melanjutkan, buat backup baru lalu jalankan uninstall lagi; untuk membatalkan "
+            f"yang sudah dihapus, pakai `distrorelay restore --backup {args.backup} ...`.",
+            style="bold yellow",
+        )
+        return 1
 
     with console.status("Post-check (scan ulang)…") as status:
-        after = run_scan(progress=lambda m: status.update(m))
-    checks = post_check(plan, gate.manifest, report, after)
-    journal.post_check(all(c.ok for c in checks), [c.name for c in checks if not c.ok])
+        checks = flow.post_check(progress=lambda m: status.update(m))
     console.print(render.verifications_text("Post-check", checks))
     if not result.completed or not all(c.ok for c in checks):
         console.print(
-            f"\nAda yang tidak sesuai. Pulihkan dengan `distrohop restore --backup {args.backup} ...`, "
+            f"\nAda yang tidak sesuai. Pulihkan dengan `distrorelay restore --backup {args.backup} ...`, "
             "atau ikuti docs/RECOVERY.md kalau Windows tidak bisa boot.",
             style="bold yellow",
         )
@@ -387,7 +377,9 @@ def _run_restore_command(args: argparse.Namespace) -> int:
         return 1
     console.print(f"Akan dipulihkan: folder/file {args.esp_item or '-'}, entri {[r['description'] for r in chosen] or '-'}",
                   markup=False)
-    if _ask("Ketik PULIHKAN untuk menjalankan: ") != "PULIHKAN":
+    from .windows.workflow import RESTORE_WORD, typed
+
+    if not typed(_ask_word(f"Ketik {RESTORE_WORD} untuk menjalankan: "), RESTORE_WORD):
         console.print("Dibatalkan.")
         return 1
 
@@ -416,18 +408,18 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     if sys.platform != "win32":
-        print("Bagian Windows DistroHop hanya berjalan di Windows.")
+        print("Bagian Windows DistroRelay hanya berjalan di Windows.")
         return 2
 
     from .windows.elevate import is_admin, relaunch_as_admin
 
     if not is_admin() and not args.no_elevate and args.command not in _NO_ADMIN_COMMANDS:
-        print("DistroHop butuh hak Administrator untuk membaca ESP, NVRAM, dan header partisi.")
+        print("DistroRelay butuh hak Administrator untuk membaca ESP, NVRAM, dan header partisi.")
         print("Membuka jendela Administrator (konfirmasi di dialog UAC)…")
         if relaunch_as_admin(["--elevated-child", *argv]):
             return 0
         print("Permintaan Administrator dibatalkan.")
-        print("Untuk scan terbatas tanpa admin: python -m distrohop --no-elevate scan")
+        print("Untuk scan terbatas tanpa admin: python -m distrorelay --no-elevate scan")
         return 1
 
     try:

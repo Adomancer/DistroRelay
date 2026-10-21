@@ -1,7 +1,7 @@
 import struct
 import uuid
 
-from distrohop.windows.fsprobe import probe_bytes
+from distrorelay.windows.fsprobe import probe_bytes
 from helpers import BOOT_UUID, btrfs_image, ext4_image, fat32_image
 
 ROOT_UUID = "11111111-2222-4333-8444-555555555555"
