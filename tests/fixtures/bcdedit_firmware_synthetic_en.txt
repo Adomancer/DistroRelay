@@ -1,0 +1,34 @@
+
+Firmware Boot Manager
+---------------------
+identifier              {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}
+displayorder            {0b5f2d1e-7a39-11ef-9a6b-806e6f6e6963}
+                        {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+                        {0b5f2d1f-7a39-11ef-9a6b-806e6f6e6963}
+timeout                 0
+
+Windows Boot Manager
+--------------------
+identifier              {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+device                  partition=\Device\HarddiskVolume1
+path                    \EFI\Microsoft\Boot\bootmgfw.efi
+description             Windows Boot Manager
+locale                  en-US
+inherit                 {7ea2e1ac-2e61-4728-aaa3-896d9d0a9f0e}
+default                 {0b5f2d20-7a39-11ef-9a6b-806e6f6e6963}
+resumeobject            {0b5f2d21-7a39-11ef-9a6b-806e6f6e6963}
+displayorder            {0b5f2d20-7a39-11ef-9a6b-806e6f6e6963}
+toolsdisplayorder       {b2721d73-1db4-4c62-bf78-c548a880142d}
+timeout                 30
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {0b5f2d1e-7a39-11ef-9a6b-806e6f6e6963}
+device                  partition=\Device\HarddiskVolume1
+path                    \EFI\fedora\shimx64.efi
+description             Fedora
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {0b5f2d1f-7a39-11ef-9a6b-806e6f6e6963}
+description             UEFI: PXE IPv4 Realtek PCIe GBE Family Controller
