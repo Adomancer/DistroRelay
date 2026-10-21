@@ -350,9 +350,16 @@ def _run_restore_command(args: argparse.Namespace) -> int:
     from rich.console import Console
 
     from . import render
-    from .windows import disks, esp
-    from .windows.backup import backups_root, verify_backup_dir
+    from .windows import disks, esp, flush
+    from .windows.backup import Verification, backups_root, verify_backup_dir
     from .windows.restore import restore_boot_entry, restore_esp_items, restore_runner
+
+    def _durable(label, action) -> Verification:
+        try:
+            action()
+        except flush.FlushError as exc:
+            return Verification(label, False, str(exc))
+        return Verification(label, True, "Ya")
     from .windows.runner import SubprocessRunner
 
     console = Console()
@@ -386,8 +393,11 @@ def _run_restore_command(args: argparse.Namespace) -> int:
     if args.esp_item:
         with esp.mounted_esp(runner, inventory.esp()) as mounted:
             results += restore_esp_items(backup, args.esp_item, mounted.root)
+            results.append(_durable("Folder/file ESP ditulis ke disk", lambda: flush.flush_volume(mounted.root)))
     for record in chosen:
         results.append(restore_boot_entry(runner, created, record))
+    if chosen:
+        results.append(_durable("BCD ditulis ke disk", flush.flush_bcd))
     console.print(render.verifications_text("Pemulihan", results))
     return 0 if all(r.ok for r in results) else 1
 

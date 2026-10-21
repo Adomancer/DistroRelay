@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from . import flush
 from .backup import sha256_file, verify_backup_dir
 from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware, merge_entries
 from .esp import norm_path
@@ -185,6 +186,20 @@ class _Context:
     hashes: dict[str, str]
     signature_of: Callable[[Runner, Path], Signature]
     read_nvram: Callable[[], NvramSnapshot] | None = None
+    flush_bcd: Callable[[], None] = flush.flush_bcd
+    flush_volume: Callable[[Path], None] = flush.flush_volume
+
+    def durable_bcd(self) -> None:
+        try:
+            self.flush_bcd()
+        except flush.FlushError as exc:
+            raise ExecutionError(str(exc)) from exc
+
+    def durable_esp(self) -> None:
+        try:
+            self.flush_volume(self.esp_root)
+        except flush.FlushError as exc:
+            raise ExecutionError(str(exc)) from exc
 
 
 def _suspend_bitlocker(action: PlannedAction, ctx: _Context) -> str:
@@ -201,7 +216,8 @@ def _set_windows_first(action: PlannedAction, ctx: _Context) -> str:
     config, _ = load_firmware(ctx.runner)
     if not config.display_order or config.display_order[0] != BOOTMGR_ID:
         raise ExecutionError("Setelah perintah dijalankan, Windows Boot Manager belum juga di urutan pertama")
-    return "Windows Boot Manager sekarang urutan pertama (dicek ulang)"
+    ctx.durable_bcd()
+    return "Windows Boot Manager sekarang urutan pertama (dicek ulang, BCD ditulis ke disk)"
 
 
 def _restore_fallback(action: PlannedAction, ctx: _Context) -> str:
@@ -227,7 +243,8 @@ def _restore_fallback(action: PlannedAction, ctx: _Context) -> str:
     os.replace(temporary, target)
     if sha256_file(target) != source_hash:
         raise ExecutionError(f"{FALLBACK} tidak sama dengan bootmgfw.efi setelah disalin")
-    return f"{FALLBACK} sekarang identik dengan bootmgfw.efi (sha256 {source_hash[:16]}…)"
+    ctx.durable_esp()
+    return f"{FALLBACK} sekarang identik dengan bootmgfw.efi (sha256 {source_hash[:16]}…, ditulis ke disk)"
 
 
 def _current_entries(ctx: _Context):
@@ -276,7 +293,10 @@ def _delete_boot_entry(action: PlannedAction, ctx: _Context) -> str:
     gone = sorted(others - remaining)
     if gone:
         raise ExecutionError("Entri lain ikut hilang dari NVRAM: " + ", ".join(f"Boot{n:04X}" for n in gone))
-    return f"Entri '{entry.description}' ({label}, {bcd_id}) dihapus (dicek ulang di NVRAM + bcdedit)"
+    # Tanpa ini, objek yang sudah dihapus bisa kembali dari BCD lama kalau listrik putus, lalu Windows
+    # membuat ulang entri NVRAM-nya di urutan pertama.
+    ctx.durable_bcd()
+    return f"Entri '{entry.description}' ({label}, {bcd_id}) dihapus (dicek ulang di NVRAM + bcdedit, BCD ditulis ke disk)"
 
 
 def _same_text(a: str | None, b: str | None) -> bool:
@@ -292,7 +312,8 @@ def _delete_esp_item(action: PlannedAction, ctx: _Context) -> str:
     _remove(target)
     if target.exists():
         raise ExecutionError(f"{rel} masih ada setelah dihapus")
-    return f"{rel} dihapus ({count} file, semuanya ada di backup)"
+    ctx.durable_esp()
+    return f"{rel} dihapus ({count} file, semuanya ada di backup; ditulis ke disk)"
 
 
 _HANDLERS: dict[str, Callable[[PlannedAction, _Context], str]] = {
@@ -318,6 +339,8 @@ def execute_plan(
     suspend_bitlocker: bool = False,
     signature_of: Callable[[Runner, Path], Signature] = check_signature,
     read_nvram: Callable[[], NvramSnapshot] | None = None,
+    flush_bcd: Callable[[], None] = flush.flush_bcd,
+    flush_volume: Callable[[Path], None] = flush.flush_volume,
     progress: Callable[[str], None] | None = None,
     fail_after: str | None = None,
 ) -> ExecutionResult:
@@ -332,7 +355,7 @@ def execute_plan(
                 ["Suspend-BitLocker -MountPoint C: -RebootCount 1"],
             ),
         )
-    ctx = _Context(runner, Path(esp_root), manifest_hashes(manifest), signature_of, read_nvram)
+    ctx = _Context(runner, Path(esp_root), manifest_hashes(manifest), signature_of, read_nvram, flush_bcd, flush_volume)
     result = ExecutionResult(session=journal.path.stem, journal_path=str(journal.path))
 
     for number, action in enumerate(actions, 1):
