@@ -59,12 +59,27 @@ def post_check(plan: UninstallPlan, manifest: dict, before: ScanReport, after: S
     checks.append(Verification("File/folder yang dihapus sudah tidak ada", not leftovers,
                                "Ya" if not leftovers else f"Masih ada: {', '.join(leftovers)}"))
 
+    # Selalu dicek, juga kalau fallback sudah diganti oleh sesi sebelumnya yang terputus: kalau NVRAM ter-reset,
+    # firmware menjalankan file ini (skenario VM 10).
     restored_fallback = any(a.kind == "restore-fallback" for a in plan.actions)
-    if restored_fallback:
-        fallback = after.esp.find(FALLBACK)
-        same = fallback is not None and bootmgfw is not None and fallback.sha256 == bootmgfw.sha256
-        checks.append(Verification("Fallback milik Windows", same,
-                                   "EFI\\Boot\\bootx64.efi identik dengan bootmgfw.efi" if same else "Tidak identik"))
+    fallback = after.esp.find(FALLBACK)
+    windows_fallback = fallback is not None and bootmgfw is not None and fallback.sha256 == bootmgfw.sha256
+    deleted_twins = sorted(
+        path for path, digest in hashes.items()
+        if fallback is not None and digest == fallback.sha256 and _under(path, deleted_paths)
+    )
+    if restored_fallback or deleted_twins:
+        detail = "EFI\\Boot\\bootx64.efi identik dengan bootmgfw.efi"
+        if not windows_fallback:
+            detail = f"Tidak; isinya sama dengan file yang sudah dihapus ({deleted_twins[0]})" if deleted_twins else "Tidak identik"
+        checks.append(Verification("Fallback milik Windows", windows_fallback, detail))
+    else:
+        detail = (
+            "EFI\\Boot\\bootx64.efi identik dengan bootmgfw.efi" if windows_fallback
+            else "Tidak ada" if fallback is None
+            else "Bukan milik Windows, tapi tidak sama dengan file yang dihapus"
+        )
+        checks.append(Verification("Fallback firmware", True, detail))
 
     current = {f.path.lower(): f.sha256 for f in after.esp.files}
     expected = {

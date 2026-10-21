@@ -350,6 +350,55 @@ def test_failed_flush_stops_execution(tmp_path):
     assert FEDORA in bcd.entries and ARCH in bcd.entries
 
 
+def test_restore_selects_duplicate_names_by_boot_number():
+    from distrohop.windows.restore import select_backup_entries
+
+    records = [
+        {"description": "Arch", "path": "\\EFI\\Arch\\grubx64.efi", "nvram_number": 8, "bcd_id": "{a}"},
+        {"description": "Fedora", "path": "\\EFI\\fedora\\shimx64.efi", "nvram_number": 7, "bcd_id": "{f7}"},
+        {"description": "Fedora", "path": "\\EFI\\fedora\\shimx64.efi", "nvram_number": 5, "bcd_id": "{f5}"},
+    ]
+    chosen, problem = select_backup_entries(records, ["Fedora"])
+    assert chosen == [] and "Ada 2 entri bernama 'Fedora'" in problem
+    assert "Boot0007" in problem and "Boot0005" in problem and "--boot-entry Boot0007" in problem
+
+    chosen, problem = select_backup_entries(records, ["arch", "boot0005", "{F7}"])
+    assert problem is None and [r["bcd_id"] for r in chosen] == ["{a}", "{f5}", "{f7}"]
+    assert select_backup_entries(records, ["Ubuntu"]) == ([], "Entri 'Ubuntu' tidak ada di backup")
+
+
+def test_interrupted_session_is_resolved_only_by_a_later_green_session(tmp_path):
+    from distrohop.windows.journal import sessions
+
+    directory = tmp_path / "journal"
+    crashed = Journal.start(directory, "20261022-040607", {"backup": "b1"})
+    crashed.record(3, "delete-boot-entry", "nv:0008", "started")
+
+    failed = Journal.start(directory, "20261022-041000", {"backup": "b2"})
+    failed.finish(True, "Semua langkah selesai")
+    failed.post_check(False, ["Entri lain tetap ada"])
+    assert [s.path.stem for s in incomplete_sessions(directory)] == ["20261022-040607"]
+
+    green = Journal.start(directory, "20261022-043352", {"backup": "b3"})
+    green.finish(True, "Semua langkah selesai")
+    green.post_check(True, [])
+    assert incomplete_sessions(directory) == []
+    first = sessions(directory)[0]
+    assert not first.finished and first.resolved_by == "20261022-043352" and first.backup == "b1"
+
+
+def test_post_check_flags_fallback_left_identical_to_a_deleted_bootloader(tmp_path):
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path)
+    gate = gate_for(tmp_path, plan, report, backup)
+    plan.actions = [a for a in plan.actions if a.kind != "restore-fallback"]  # seolah langkah ini terlewat
+
+    result, _ = run(tmp_path, bcd, esp_root, plan, gate.manifest)
+    assert result.completed, result.stopped
+    checks = {c.name: c for c in post_check(plan, gate.manifest, report, run_scan(deps()))}
+    fallback = checks["Fallback milik Windows"]
+    assert not fallback.ok and "efi\\fedora\\shimx64.efi" in fallback.message.lower()
+
+
 def test_execution_refuses_to_delete_without_nvram(tmp_path):
     bcd, esp_root, deps, report, plan, backup = world(tmp_path)
     gate = gate_for(tmp_path, plan, report, backup)

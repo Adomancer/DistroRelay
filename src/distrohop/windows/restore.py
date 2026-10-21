@@ -92,6 +92,43 @@ def restore_esp_items(backup_dir: Path, items: Sequence[str], esp_root: Path) ->
     return results
 
 
+def entry_label(record: dict) -> str:
+    number = record.get("nvram_number")
+    return f"Boot{number:04X}" if number is not None else (record.get("bcd_id") or "?")
+
+
+def describe_entry(record: dict) -> str:
+    return f"'{record.get('description') or '?'}' {entry_label(record)} ({record.get('path') or '-'})"
+
+
+def select_backup_entries(records: Sequence[dict], wanted: Sequence[str]) -> tuple[list[dict], str | None]:
+    """Pilih entri dari firmware-entries.json lewat nama, nomor Boot####, atau GUID bcdedit.
+
+    Nama yang dipakai lebih dari satu entri (mis. Fedora dobel) ditolak dengan daftar pilihannya.
+    """
+    chosen: list[dict] = []
+    for name in wanted:
+        key = name.strip().casefold()
+        matches = [
+            r for r in records
+            if key in {
+                (r.get("description") or "").strip().casefold(),
+                entry_label(r).casefold(),
+                (r.get("bcd_id") or "").casefold(),
+            }
+        ]
+        if not matches:
+            return [], f"Entri '{name}' tidak ada di backup"
+        if len(matches) > 1:
+            options = ", ".join(describe_entry(r) for r in matches)
+            return [], (
+                f"Ada {len(matches)} entri bernama '{name}' di backup: {options}. "
+                f"Pilih satu dengan nomornya, mis. --boot-entry {entry_label(matches[0])}"
+            )
+        chosen.append(matches[0])
+    return chosen, None
+
+
 def restore_boot_entry(runner: Runner, created: set[str], record: dict) -> Verification:
     """Buat ulang entri firmware dari catatan backup (firmware-entries.json), ditaruh di urutan terakhir."""
     description = record.get("description") or ""

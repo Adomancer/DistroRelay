@@ -50,6 +50,10 @@ class Journal:
     def finish(self, ok: bool, message: str = "") -> None:
         self._write(JournalEntry(_now(), "session-end", message=message, data={"ok": ok}))
 
+    def post_check(self, ok: bool, failed: list[str]) -> None:
+        """Hasil scan ulang sesudah eksekusi. Hanya sesi dengan post-check hijau yang menuntaskan sesi terputus."""
+        self._write(JournalEntry(_now(), "post-check", message=", ".join(failed), data={"ok": ok, "failed": failed}))
+
     def _write(self, entry: JournalEntry) -> None:
         with open(self.path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(asdict(entry), ensure_ascii=False) + "\n")
@@ -81,12 +85,19 @@ class SessionSummary:
     last_step: JournalEntry | None  # langkah terakhir yang tercatat (started/done/failed)
     unfinished_step: JournalEntry | None  # 'started' tanpa 'done'/'failed' = terputus di tengah langkah ini
     backup: str | None = None  # ID backup yang dipakai sesi ini
+    post_check_ok: bool | None = None  # None = post-check tidak tercatat
+    resolved_by: str | None = None  # sesi sesudahnya yang selesai dengan post-check hijau
+
+    @property
+    def needs_attention(self) -> bool:
+        return not self.finished and self.resolved_by is None
 
 
 def summarize(path: Path) -> SessionSummary:
     entries = read_journal(path)
     start = next((e for e in entries if e.status == "session-start"), None)
     end = next((e for e in reversed(entries) if e.status == "session-end"), None)
+    check = next((e for e in reversed(entries) if e.status == "post-check"), None)
     steps = [e for e in entries if e.status in ("started", "done", "failed")]
     closed = {e.step for e in steps if e.status in ("done", "failed")}
     open_steps = [e for e in steps if e.status == "started" and e.step not in closed]
@@ -98,6 +109,7 @@ def summarize(path: Path) -> SessionSummary:
         last_step=steps[-1] if steps else None,
         unfinished_step=open_steps[-1] if open_steps else None,
         backup=(start.data or {}).get("backup") if start else None,
+        post_check_ok=(check.data or {}).get("ok") if check else None,
     )
 
 
@@ -105,8 +117,15 @@ def sessions(directory: Path | None = None) -> list[SessionSummary]:
     directory = directory or journal_dir()
     if not directory.exists():
         return []
-    return [summarize(p) for p in sorted(directory.glob("*.jsonl"))]
+    found = [summarize(p) for p in sorted(directory.glob("*.jsonl"))]  # nama sesi = waktu mulai
+    for n, session in enumerate(found):
+        if session.finished:
+            continue
+        later = next((s for s in found[n + 1 :] if s.finished and s.ok and s.post_check_ok), None)
+        session.resolved_by = later.path.stem if later else None
+    return found
 
 
 def incomplete_sessions(directory: Path | None = None) -> list[SessionSummary]:
-    return [s for s in sessions(directory) if not s.finished]
+    """Sesi terputus yang belum dituntaskan oleh sesi sesudahnya."""
+    return [s for s in sessions(directory) if s.needs_attention]

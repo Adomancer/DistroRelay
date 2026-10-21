@@ -30,7 +30,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from distrohop.windows import gpt_types
+from distrohop.windows import flush, gpt_types
 from distrohop.windows.disks import MIB, DiskInventory, load_inventory
 from distrohop.windows.elevate import is_admin
 from distrohop.windows.esp import mounted_esp
@@ -205,6 +205,7 @@ def write_esp(runner: SubprocessRunner, inventory: DiskInventory) -> None:
             path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+        flush.flush_volume(root)
 
 
 def create_entries(runner: SubprocessRunner) -> dict[str, str]:
@@ -218,6 +219,8 @@ def create_entries(runner: SubprocessRunner) -> dict[str, str]:
     # /addfirst satu per satu dari belakang: hasilnya Fedora, Arch, lalu Windows Boot Manager.
     for description, _ in reversed(ENTRIES):
         run_bcdedit(runner, "/set", "{fwbootmgr}", "displayorder", created[description], "/addfirst")
+    # Tanpa ini, Windows sempat membuat ulang entri dobel saat boot berikutnya (uji VM 2026-10-22).
+    flush.flush_bcd()
     return created
 
 

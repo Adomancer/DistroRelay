@@ -63,7 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     restore = commands.add_parser("restore", help="pulihkan folder ESP dan/atau entri boot dari backup")
     restore.add_argument("--backup", metavar="ID", required=True)
     restore.add_argument("--esp-item", action="append", default=[], metavar="PATH", help="mis. EFI\\fedora")
-    restore.add_argument("--boot-entry", action="append", default=[], metavar="NAMA", help="nama entri, mis. Fedora")
+    restore.add_argument("--boot-entry", action="append", default=[], metavar="NAMA",
+                         help="nama entri (mis. Fedora), atau nomornya (mis. Boot0007) kalau namanya dipakai lebih dari satu entri")
     commands.add_parser("journal", help="tampilkan sesi eksekusi, termasuk yang terputus di tengah")
     return parser
 
@@ -333,6 +334,7 @@ def _run_uninstall_command(args: argparse.Namespace) -> int:
     with console.status("Post-check (scan ulang)…") as status:
         after = run_scan(progress=lambda m: status.update(m))
     checks = post_check(plan, gate.manifest, report, after)
+    journal.post_check(all(c.ok for c in checks), [c.name for c in checks if not c.ok])
     console.print(render.verifications_text("Post-check", checks))
     if not result.completed or not all(c.ok for c in checks):
         console.print(
@@ -352,7 +354,13 @@ def _run_restore_command(args: argparse.Namespace) -> int:
     from . import render
     from .windows import disks, esp, flush
     from .windows.backup import Verification, backups_root, verify_backup_dir
-    from .windows.restore import restore_boot_entry, restore_esp_items, restore_runner
+    from .windows.restore import (
+        describe_entry,
+        restore_boot_entry,
+        restore_esp_items,
+        restore_runner,
+        select_backup_entries,
+    )
 
     def _durable(label, action) -> Verification:
         try:
@@ -370,17 +378,13 @@ def _run_restore_command(args: argparse.Namespace) -> int:
         return 1
     records = json.loads((backup / "firmware-entries.json").read_text(encoding="utf-8"))
     if not args.esp_item and not args.boot_entry:
-        console.print("Pilih yang mau dipulihkan dengan --esp-item PATH dan/atau --boot-entry NAMA.")
-        console.print("Entri di backup: " + ", ".join(f"'{r['description']}' ({r.get('path') or '-'})" for r in records),
-                      markup=False)
+        console.print("Pilih yang mau dipulihkan dengan --esp-item PATH dan/atau --boot-entry NAMA atau Boot####.")
+        console.print("Entri di backup: " + ", ".join(describe_entry(r) for r in records), markup=False)
         return 1
-    chosen = []
-    for name in args.boot_entry:
-        matches = [r for r in records if (r.get("description") or "").casefold() == name.casefold()]
-        if len(matches) != 1:
-            console.print(f"Entri '{name}' tidak ditemukan (atau lebih dari satu) di backup", style="red", markup=False)
-            return 1
-        chosen.append(matches[0])
+    chosen, problem = select_backup_entries(records, args.boot_entry)
+    if problem:
+        console.print(problem, style="red", markup=False)
+        return 1
     console.print(f"Akan dipulihkan: folder/file {args.esp_item or '-'}, entri {[r['description'] for r in chosen] or '-'}",
                   markup=False)
     if _ask("Ketik PULIHKAN untuk menjalankan: ") != "PULIHKAN":

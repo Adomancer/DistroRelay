@@ -305,7 +305,9 @@ def journal_text(sessions) -> Text:
     if not sessions:
         text.append("  Belum ada.\n", style="dim")
     for s in sessions:
-        if not s.finished:
+        if not s.finished and s.resolved_by:
+            status, style = f"terputus, dituntaskan oleh sesi {s.resolved_by}", "dim"
+        elif not s.finished:
             status, style = "TERPUTUS", "bold yellow"
         elif s.ok:
             status, style = "selesai", "green"
@@ -315,6 +317,9 @@ def journal_text(sessions) -> Text:
         text.append(f"{status}\n", style=style)
         if s.backup:
             text.append(f"      Backup: {s.backup}\n", style="dim")
+        if s.post_check_ok is not None:
+            text.append(f"      Post-check: {'ok' if s.post_check_ok else 'ADA YANG GAGAL'}\n",
+                        style="dim" if s.post_check_ok else "red")
         if s.unfinished_step is not None:
             u = s.unfinished_step
             text.append(f"      Terputus saat langkah {u.step} ({u.kind} {u.ref or ''}) sedang berjalan\n", style="yellow")
