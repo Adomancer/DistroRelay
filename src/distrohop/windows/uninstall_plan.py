@@ -155,14 +155,37 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
         if not entry.bcd_id:
             plan.blocked.append(f"{comp.ref}: entri '{entry.description}' tidak punya GUID bcdedit, tidak bisa dihapus")
             continue
+        # `bcdedit /delete` menghapus Boot#### yang dipasangkan Windows dengan objek itu. Kalau pasangan itu
+        # tidak terlihat di NVRAM, atau isinya beda, entri yang ikut terhapus bisa milik perangkat lain.
+        if "NVRAM" not in entry.sources:
+            plan.blocked.append(
+                f"{comp.ref}: entri '{entry.description}' hanya terlihat di bcdedit, tidak di NVRAM; "
+                "entri firmware mana yang ikut terhapus tidak bisa dipastikan"
+            )
+            continue
+        if entry.conflicts:
+            plan.blocked.append(
+                f"{comp.ref}: data bcdedit tidak cocok dengan NVRAM ({'; '.join(entry.conflicts)}); "
+                "objek BCD-nya kemungkinan basi, tidak dihapus"
+            )
+            continue
         plan.actions.append(
             PlannedAction(
                 "delete-boot-entry",
                 f"Hapus entri boot '{entry.description}' ({entry.label})",
                 [f"bcdedit /delete {entry.bcd_id}"],
-                [f"Menjalankan: {entry.path or '(tanpa file)'}", "GUID & path dicek ulang sesaat sebelum dihapus"],
+                [
+                    f"Menjalankan: {entry.path or '(tanpa file)'}",
+                    "Terkonfirmasi di NVRAM + bcdedit; dicek ulang ke keduanya sesaat sebelum dihapus",
+                ],
                 comp.ref,
-                {"bcd_id": entry.bcd_id, "description": entry.description, "path": entry.path, "label": entry.label},
+                {
+                    "bcd_id": entry.bcd_id,
+                    "description": entry.description,
+                    "path": entry.path,
+                    "label": entry.label,
+                    "nvram_number": entry.nvram_number,
+                },
             )
         )
 

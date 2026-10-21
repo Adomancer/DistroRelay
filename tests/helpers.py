@@ -255,6 +255,18 @@ class FakeBcd:
         self.signature = signature
         self.failures: dict[str, str] = {}  # awalan command_key -> pesan error
         self.calls: list[tuple[str, ...]] = []
+        # Objek BCD basi: isi Boot#### di NVRAM berbeda dengan yang dicatat bcdedit (mis. perangkat keras, tanpa path).
+        self.nvram_hardware: set[str] = set()
+        # Objek yang hanya ada di bcdedit, tanpa Boot####.
+        self.bcd_only: set[str] = set()
+        # /delete X ikut menghapus Y (meniru Windows yang memasangkan objek ke Boot#### lain).
+        self.collateral: dict[str, str] = {}
+
+    def add(self, identifier: str, description: str, path: str | None, *, in_order: bool = True) -> None:
+        self.entries[identifier] = {"description": description, "path": path}
+        self.numbers[identifier] = max(self.numbers.values()) + 1
+        if in_order:
+            self.order.append(identifier)
 
     # --- Runner ---
     def run(self, args, *, timeout=120):
@@ -290,8 +302,9 @@ class FakeBcd:
         if low[:1] == ["/delete"] and len(low) == 2:
             if low[1] not in self.entries:
                 return CommandResult(args, 1, "", "The specified entry identifier is not valid.")
-            del self.entries[low[1]]
-            self.order = [i for i in self.order if i != low[1]]
+            for gone in {low[1], self.collateral.get(low[1])} - {None}:
+                self.entries.pop(gone, None)
+                self.order = [i for i in self.order if i != gone]
             return ok("The operation completed successfully.")
         if low[:3] == ["/copy", "{bootmgr}", "/d"]:
             new = "{" + str(uuid.uuid4()) + "}"
@@ -323,9 +336,15 @@ class FakeBcd:
         return "\n".join(lines) + "\n"
 
     def nvram(self):
-        raw = {"BootOrder": struct.pack(f"<{len(self.order)}H", *(self.numbers[i] for i in self.order)).hex()}
+        order = [i for i in self.order if i not in self.bcd_only]
+        raw = {"BootOrder": struct.pack(f"<{len(order)}H", *(self.numbers[i] for i in order)).hex()}
         for identifier, entry in self.entries.items():
-            nodes = [hd_node(1, ESP_GUID)] + ([file_node(entry["path"])] if entry["path"] else [])
+            if identifier in self.bcd_only:
+                continue
+            if identifier in self.nvram_hardware:  # Acpi/Pci/Sata, seperti "UEFI VBOX HARDDISK"
+                nodes = [raw_node(0x02, 0x01, 8), raw_node(0x01, 0x01, 2), raw_node(0x03, 0x12, 6)]
+            else:
+                nodes = [hd_node(1, ESP_GUID)] + ([file_node(entry["path"])] if entry["path"] else [])
             optional = windows_optional_data(identifier) if identifier == self.bootmgr else b""
             raw[f"Boot{self.numbers[identifier]:04X}"] = load_option(entry["description"], nodes, optional).hex()
         return snapshot_from_raw(raw)

@@ -656,6 +656,7 @@ class _Context:
 
 def _boot_entry_component(entry: BootEntry, ctx: _Context) -> tuple[Component, str]:
     evidence = [f"Terlihat di: {' + '.join(entry.sources)}"]
+    evidence += [f"Tidak cocok: {c}" for c in entry.conflicts]
     evidence.append(f"Urutan boot ke-{entry.order + 1}" if entry.order is not None else "Tidak ada di urutan boot")
     if entry.active is False:
         evidence.append("Status: tidak aktif")

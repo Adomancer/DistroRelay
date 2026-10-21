@@ -1,0 +1,84 @@
+
+Firmware Boot Manager
+---------------------
+identifier              {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}
+displayorder            {e4173ee1-cddc-11f1-99d6-f0ee4d085743}
+                        {e4173ee0-cddc-11f1-99d6-f0ee4d085743}
+                        {67bc5d2c-cd80-11f1-9d4b-806e6f6e6963}
+                        {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+                        {e4173ed9-cddc-11f1-99d6-f0ee4d085743}
+                        {e4173eda-cddc-11f1-99d6-f0ee4d085743}
+                        {e4173edb-cddc-11f1-99d6-f0ee4d085743}
+                        {02faf3b2-cd66-11f1-9d46-806e6f6e6963}
+timeout                 0
+
+Windows Boot Manager
+--------------------
+identifier              {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+device                  partition=\Device\HarddiskVolume2
+path                    \EFI\Microsoft\Boot\bootmgfw.efi
+description             Windows Boot Manager
+locale                  en-US
+inherit                 {7ea2e1ac-2e61-4728-aaa3-896d9d0a9f0e}
+default                 {e4173edd-cddc-11f1-99d6-f0ee4d085743}
+resumeobject            {e4173edc-cddc-11f1-99d6-f0ee4d085743}
+displayorder            {e4173edd-cddc-11f1-99d6-f0ee4d085743}
+toolsdisplayorder       {b2721d73-1db4-4c62-bf78-c548a880142d}
+timeout                 30
+
+Windows Boot Manager
+--------------------
+identifier              {e4173ee0-cddc-11f1-99d6-f0ee4d085743}
+device                  partition=\Device\HarddiskVolume2
+path                    \EFI\fedora\shimx64.efi
+description             Fedora
+locale                  en-US
+inherit                 {7ea2e1ac-2e61-4728-aaa3-896d9d0a9f0e}
+default                 {e4173edd-cddc-11f1-99d6-f0ee4d085743}
+resumeobject            {e4173edc-cddc-11f1-99d6-f0ee4d085743}
+displayorder            {e4173edd-cddc-11f1-99d6-f0ee4d085743}
+toolsdisplayorder       {b2721d73-1db4-4c62-bf78-c548a880142d}
+timeout                 30
+
+Windows Boot Manager
+--------------------
+identifier              {e4173ee1-cddc-11f1-99d6-f0ee4d085743}
+device                  partition=\Device\HarddiskVolume2
+path                    \EFI\Arch\grubx64.efi
+description             Arch
+locale                  en-US
+inherit                 {7ea2e1ac-2e61-4728-aaa3-896d9d0a9f0e}
+default                 {e4173edd-cddc-11f1-99d6-f0ee4d085743}
+resumeobject            {e4173edc-cddc-11f1-99d6-f0ee4d085743}
+displayorder            {e4173edd-cddc-11f1-99d6-f0ee4d085743}
+toolsdisplayorder       {b2721d73-1db4-4c62-bf78-c548a880142d}
+timeout                 30
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {02faf3b2-cd66-11f1-9d46-806e6f6e6963}
+device                  partition=\Device\HarddiskVolume2
+path                    \EFI\fedora\shimx64.efi
+description             UEFI VBOX HARDDISK VB86621e4c-074226d4 
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {67bc5d2c-cd80-11f1-9d4b-806e6f6e6963}
+device                  partition=\Device\HarddiskVolume2
+path                    \EFI\fedora\shimx64.efi
+description             Fedora
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {e4173ed9-cddc-11f1-99d6-f0ee4d085743}
+description             UiApp
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {e4173eda-cddc-11f1-99d6-f0ee4d085743}
+description             UEFI VBOX CD-ROM VB1-1a2b3c4d 
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {e4173edb-cddc-11f1-99d6-f0ee4d085743}
+description             UEFI VBOX HARDDISK VB08606184-ff119b53 
