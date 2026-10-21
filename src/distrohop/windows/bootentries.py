@@ -194,7 +194,56 @@ class BootEntry:
 
 
 def _same(a: str | None, b: str | None) -> bool:
-    return (a or "").casefold() == (b or "").casefold()
+    # Firmware sering menyimpan nama dengan spasi di akhir ("UEFI VBOX HARDDISK VB…-… "), bcdedit tidak.
+    return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+
+def _match_bcd(fw: FirmwareConfig, nv: NvramSnapshot, unmatched_bcd: list) -> dict[int, object]:
+    """Pasangkan tiap Boot#### dengan objek bcdedit-nya, dari bukti terkuat ke terlemah.
+
+    1. BCDOBJECT di optional data. Kalau satu objek diklaim beberapa Boot#### (firmware/Windows bisa
+       membuat entri dobel), hanya yang posisinya sejajar di urutan boot yang dipasangkan. displayorder
+       {fwbootmgr} adalah cermin BootOrder, jadi posisinya sama.
+    2. Nama + path sama. Kalau kandidatnya lebih dari satu, pilih yang posisinya sejajar.
+    3. Tanpa path: nama sama, hanya kalau kandidatnya tepat satu (atau satu yang posisinya sejajar).
+    Tiap aturan dijalankan untuk semua entri dulu sebelum aturan berikutnya, supaya bukti lemah pada
+    satu entri tidak merebut objek yang punya bukti kuat untuk entri lain.
+    """
+    claims: dict[str, int] = {}
+    for option in nv.options.values():
+        if option.bcd_object:
+            claims[option.bcd_object] = claims.get(option.bcd_object, 0) + 1
+
+    def aligned(number: int, entry) -> bool:
+        position = nv.position(number)
+        return position is not None and fw.display_order[position : position + 1] == [entry.identifier]
+
+    def by_object(number, option):
+        found = [e for e in unmatched_bcd if option.bcd_object and e.identifier == option.bcd_object]
+        if found and claims[option.bcd_object] > 1 and not aligned(number, found[0]):
+            return []
+        return found
+
+    def by_name_and_path(number, option):
+        return [e for e in unmatched_bcd if _same(e.description, option.description) and _same(e.path, option.file_path)]
+
+    def by_name_without_path(number, option):
+        if option.file_path:
+            return []
+        found = [e for e in unmatched_bcd if _same(e.description, option.description) and not e.path]
+        return found if len(found) == 1 else [e for e in found if aligned(number, e)]
+
+    matches: dict[int, object] = {}
+    for rule in (by_object, by_name_and_path, by_name_without_path):
+        for number in sorted(nv.options):
+            if number in matches:
+                continue
+            found = rule(number, nv.options[number])
+            match = next((e for e in found if aligned(number, e)), found[0] if found else None)
+            if match is not None:
+                matches[number] = match
+                unmatched_bcd.remove(match)
+    return matches
 
 
 def merge_entries(fw: FirmwareConfig | None, nv: NvramSnapshot | None) -> tuple[list[BootEntry], list[str]]:
@@ -204,26 +253,10 @@ def merge_entries(fw: FirmwareConfig | None, nv: NvramSnapshot | None) -> tuple[
     unmatched_bcd = list(fw.entries) if fw else []
 
     if nv is not None:
+        matches = _match_bcd(fw, nv, unmatched_bcd) if fw is not None else {}
         for number in sorted(nv.options):
             option = nv.options[number]
-            match = None
-            if fw is not None:
-                bcd_object = option.bcd_object
-                match = next((e for e in unmatched_bcd if bcd_object and e.identifier == bcd_object), None)
-                if match is None:
-                    match = next(
-                        (
-                            e
-                            for e in unmatched_bcd
-                            if _same(e.description, option.description) and _same(e.path, option.file_path)
-                        ),
-                        None,
-                    )
-                if match is None and not option.file_path:
-                    same_name = [e for e in unmatched_bcd if _same(e.description, option.description) and not e.path]
-                    match = same_name[0] if len(same_name) == 1 else None
-                if match is not None:
-                    unmatched_bcd.remove(match)
+            match = matches.get(number)
             sources = ["NVRAM", "bcdedit"] if match else ["NVRAM"]
             entries.append(
                 BootEntry(
