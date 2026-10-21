@@ -80,6 +80,7 @@ class SessionSummary:
     ok: bool | None
     last_step: JournalEntry | None  # langkah terakhir yang tercatat (started/done/failed)
     unfinished_step: JournalEntry | None  # 'started' tanpa 'done'/'failed' = terputus di tengah langkah ini
+    backup: str | None = None  # ID backup yang dipakai sesi ini
 
 
 def summarize(path: Path) -> SessionSummary:
@@ -96,6 +97,7 @@ def summarize(path: Path) -> SessionSummary:
         ok=(end.data or {}).get("ok") if end else None,
         last_step=steps[-1] if steps else None,
         unfinished_step=open_steps[-1] if open_steps else None,
+        backup=(start.data or {}).get("backup") if start else None,
     )
 
 

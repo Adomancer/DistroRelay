@@ -75,9 +75,12 @@ def gate_for(tmp_path, plan, report, backup, confirmed=("emergency-usb",), exter
     )
 
 
-def run(tmp_path, bcd, esp_root, plan, manifest, **kwargs):
-    journal = Journal.start(tmp_path / "journal", "sesi-test", {})
+def run(tmp_path, bcd, esp_root, plan, manifest, flushes=None, **kwargs):
+    journal = Journal.start(tmp_path / "journal", "sesi-test", {"backup": "backup-test"})
+    log = flushes if flushes is not None else []
     kwargs.setdefault("read_nvram", bcd.nvram)
+    kwargs.setdefault("flush_bcd", lambda: log.append(("bcd", len(bcd.calls))))
+    kwargs.setdefault("flush_volume", lambda root: log.append(("esp", len(bcd.calls))))
     result = execute_plan(plan, runner=execution_runner(bcd, plan), esp_root=esp_root, manifest=manifest, journal=journal, **kwargs)
     return result, journal
 
@@ -310,6 +313,41 @@ def test_other_entry_disappearing_with_a_delete_stops_execution(tmp_path):
     assert not result.completed
     assert "Entri lain ikut hilang" in result.stopped
     assert ARCH in bcd.entries  # langkah berikutnya tidak dijalankan
+
+
+def test_every_boot_change_is_written_to_disk_before_the_next_step(tmp_path):
+    # Temuan skenario 7 di VM: /delete yang belum tertulis dari hive BCD hilang saat listrik putus,
+    # lalu Windows membuat ulang entrinya di urutan pertama.
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path)
+    gate = gate_for(tmp_path, plan, report, backup)
+    flushes = []
+    result, journal = run(tmp_path, bcd, esp_root, plan, gate.manifest, flushes=flushes)
+    assert result.completed, result.stopped
+    assert [kind for kind, _ in flushes] == ["bcd", "esp", "bcd", "bcd", "esp", "esp", "esp"]
+
+    changes = [i for i, call in enumerate(bcd.calls) if call[0] == "bcdedit" and call[1].lower() in ("/set", "/delete")]
+    flushed_at = [n for kind, n in flushes if kind == "bcd"]
+    assert len(changes) == len(flushed_at)
+    for n, (change, at) in enumerate(zip(changes, flushed_at)):
+        assert change < at  # ditulis setelah perubahannya...
+        if n + 1 < len(changes):
+            assert at <= changes[n + 1]  # ...dan sebelum perubahan berikutnya
+    assert summarize(journal.path).backup == "backup-test"
+
+
+def test_failed_flush_stops_execution(tmp_path):
+    from distrohop.windows.flush import FlushError
+
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path)
+    gate = gate_for(tmp_path, plan, report, backup)
+
+    def broken():
+        raise FlushError("Hive BCD gagal ditulis ke disk: [WinError 5] Access is denied")
+
+    result, _ = run(tmp_path, bcd, esp_root, plan, gate.manifest, flush_bcd=broken)
+    assert not result.completed
+    assert result.steps[-1].kind == "set-windows-first" and "Hive BCD gagal" in result.stopped
+    assert FEDORA in bcd.entries and ARCH in bcd.entries
 
 
 def test_execution_refuses_to_delete_without_nvram(tmp_path):

@@ -313,6 +313,8 @@ def journal_text(sessions) -> Text:
             status, style = "berhenti karena gagal", "red"
         text.append(f"  {s.path.stem}  ", style="bold")
         text.append(f"{status}\n", style=style)
+        if s.backup:
+            text.append(f"      Backup: {s.backup}\n", style="dim")
         if s.unfinished_step is not None:
             u = s.unfinished_step
             text.append(f"      Terputus saat langkah {u.step} ({u.kind} {u.ref or ''}) sedang berjalan\n", style="yellow")
