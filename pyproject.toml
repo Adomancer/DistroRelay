@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distrohop"
+version = "0.1.0"
+description = "Toolkit distro-hopping untuk dual-boot Windows + Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["textual>=8.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+distrohop = "distrohop.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

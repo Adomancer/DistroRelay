@@ -1,0 +1,52 @@
+
+Firmware Boot Manager
+---------------------
+identifier              {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}
+displayorder            {8bd7fdcc-13ca-11f1-84fe-806e6f6e6963}
+                        {41acf87b-38e5-11f1-8536-806e6f6e6963}
+                        {fb3dba71-dd51-11f0-8498-806e6f6e6963}
+                        {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+                        {5cb984e7-b72d-11ed-83d9-806e6f6e6963}
+timeout                 0
+
+Windows Boot Manager
+--------------------
+identifier              {9dea862c-5cdd-4e70-acc1-f32b344d4795}
+device                  partition=\Device\HarddiskVolume1
+path                    \EFI\Microsoft\Boot\bootmgfw.efi
+description             Windows Boot Manager
+locale                  en-US
+inherit                 {7ea2e1ac-2e61-4728-aaa3-896d9d0a9f0e}
+isolatedcontext         Yes
+default                 {591df32e-8eb5-11f0-866a-2e3b709b8b23}
+resumeobject            {591df32d-8eb5-11f0-866a-2e3b709b8b23}
+displayorder            {591df32e-8eb5-11f0-866a-2e3b709b8b23}
+toolsdisplayorder       {b2721d73-1db4-4c62-bf78-c548a880142d}
+timeout                 30
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {41acf87b-38e5-11f1-8536-806e6f6e6963}
+description             USB Drive (UEFI)
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {5cb984e7-b72d-11ed-83d9-806e6f6e6963}
+device                  partition=\Device\HarddiskVolume1
+description             Solid State Disk
+isolatedcontext         Yes
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {8bd7fdcc-13ca-11f1-84fe-806e6f6e6963}
+device                  partition=\Device\HarddiskVolume1
+path                    \EFI\fedora\shimx64.efi
+description             Fedora
+
+Firmware Application (101fffff)
+-------------------------------
+identifier              {fb3dba71-dd51-11f0-8498-806e6f6e6963}
+device                  partition=\Device\HarddiskVolume1
+path                    \EFI\Arch\grubx64.efi
+description             Arch
+isolatedcontext         Yes
