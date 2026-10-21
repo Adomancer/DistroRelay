@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import struct
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from distrohop.windows import disks
-from distrohop.windows.esp import scan_esp
+from distrohop.windows.esp import MountedEsp, scan_esp
+from distrohop.windows.nvram import snapshot_from_raw
+from distrohop.windows.runner import FakeRunner, ReadOnlyRunner
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -225,6 +228,160 @@ def write_tree(root: Path, files: dict[str, bytes | str]) -> None:
 def fake_esp(root: Path, inventory: disks.DiskInventory, files: dict[str, bytes | str]):
     write_tree(root, files)
     return scan_esp(root, inventory.esp())
+
+
+VALID_SIGNATURE = (
+    '{"Status":"Valid","Message":"Signature verified.",'
+    '"Subject":"CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",'
+    '"Issuer":"CN=Microsoft Windows Production PCA 2011","Thumbprint":"ABC"}'
+)
+
+
+class FakeBcd:
+    """Simulasi bcdedit + NVRAM yang punya state: /delete benar-benar menghapus, /copy benar-benar membuat entri.
+
+    Cukup untuk menguji eksekusi & pemulihan tanpa menyentuh firmware sungguhan.
+    """
+
+    def __init__(self, bcdedit_text: str, bitlocker: str = None, signature: str = VALID_SIGNATURE):
+        from distrohop.windows.bootentries import BOOTMGR_ID, parse_firmware
+
+        config = parse_firmware(bcdedit_text)
+        self.bootmgr = BOOTMGR_ID
+        self.entries = {e.identifier: {"description": e.description, "path": e.path} for e in config.entries}
+        self.order = list(config.display_order)
+        self.numbers = {identifier: n for n, identifier in enumerate(self.entries)}
+        self.bitlocker = bitlocker or BITLOCKER_OFF
+        self.signature = signature
+        self.failures: dict[str, str] = {}  # awalan command_key -> pesan error
+        self.calls: list[tuple[str, ...]] = []
+
+    # --- Runner ---
+    def run(self, args, *, timeout=120):
+        from distrohop.windows.runner import CommandResult, command_key, decode_powershell
+
+        args = tuple(args)
+        self.calls.append(args)
+        key = command_key(args)
+
+        def ok(stdout=""):
+            return CommandResult(args, 0, stdout, "")
+
+        for prefix, error in self.failures.items():
+            if key.startswith(prefix):
+                return CommandResult(args, 1, "", error)
+        script = decode_powershell(args)
+        if script is not None:
+            return ok({"ps:disks": fixture_text("disks_laptop.json"), "ps:bitlocker": self.bitlocker,
+                       "ps:authenticode": self.signature}.get(key, ""))
+        if key.startswith("mountvol"):
+            return ok()
+        a = list(args[1:])
+        low = [x.lower() for x in a]
+        if low == ["/enum", "firmware", "/v"] or (low[:1] == ["/store"] and "/enum" in low):
+            return ok(self.render())
+        if low[:1] == ["/export"]:
+            Path(a[1]).write_bytes(b"regf hive palsu")
+            Path(a[1] + ".LOG").write_bytes(b"log")
+            return ok("The operation completed successfully.")
+        if low == ["/set", "{fwbootmgr}", "displayorder", "{bootmgr}", "/addfirst"]:
+            self.order = [self.bootmgr] + [i for i in self.order if i != self.bootmgr]
+            return ok("The operation completed successfully.")
+        if low[:1] == ["/delete"] and len(low) == 2:
+            if low[1] not in self.entries:
+                return CommandResult(args, 1, "", "The specified entry identifier is not valid.")
+            del self.entries[low[1]]
+            self.order = [i for i in self.order if i != low[1]]
+            return ok("The operation completed successfully.")
+        if low[:3] == ["/copy", "{bootmgr}", "/d"]:
+            new = "{" + str(uuid.uuid4()) + "}"
+            self.entries[new] = {"description": a[3], "path": self.entries[self.bootmgr]["path"]}
+            self.numbers[new] = max(self.numbers.values()) + 1
+            return ok(f"The entry was successfully copied to {new}.")
+        if low[:1] == ["/set"] and len(low) == 4 and low[2] == "path":
+            self.entries[low[1]]["path"] = a[3]
+            return ok("The operation completed successfully.")
+        if low[:3] == ["/set", "{fwbootmgr}", "displayorder"] and low[4:] == ["/addlast"]:
+            self.order = [i for i in self.order if i != low[3]] + [low[3]]
+            return ok("The operation completed successfully.")
+        return CommandResult(args, 1, "", f"FakeBcd: perintah tidak dikenal {key!r}")
+
+    # --- Tampilan seperti bcdedit /enum firmware /v ---
+    def render(self) -> str:
+        lines = ["", "Firmware Boot Manager", "---------------------",
+                 "identifier              {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}"]
+        for n, identifier in enumerate(self.order):
+            lines.append(("displayorder            " if n == 0 else "                        ") + identifier)
+        lines.append("timeout                 0")
+        for identifier, entry in self.entries.items():
+            title = "Windows Boot Manager" if identifier == self.bootmgr else "Firmware Application (101fffff)"
+            lines += ["", title, "-" * len(title), f"identifier              {identifier}"]
+            if entry["path"]:
+                lines.append("device                  partition=\\Device\\HarddiskVolume1")
+                lines.append(f"path                    {entry['path']}")
+            lines.append(f"description             {entry['description']}")
+        return "\n".join(lines) + "\n"
+
+    def nvram(self):
+        raw = {"BootOrder": struct.pack(f"<{len(self.order)}H", *(self.numbers[i] for i in self.order)).hex()}
+        for identifier, entry in self.entries.items():
+            nodes = [hd_node(1, ESP_GUID)] + ([file_node(entry["path"])] if entry["path"] else [])
+            optional = windows_optional_data(identifier) if identifier == self.bootmgr else b""
+            raw[f"Boot{self.numbers[identifier]:04X}"] = load_option(entry["description"], nodes, optional).hex()
+        return snapshot_from_raw(raw)
+
+
+def laptop_world(tmp_path: Path):
+    """Laptop simulasi: bcdedit asli dari fixture, ESP dengan layout asli, partisi #5 = ext4 /boot Fedora."""
+    from distrohop.windows.runner import ReadOnlyRunner
+    from distrohop.windows.scanner import ScanDeps
+
+    bcd = FakeBcd(fixture_text("bcdedit_firmware_laptop.txt"))
+    esp_root = tmp_path / "esp"
+    write_tree(esp_root, laptop_real_esp_files())
+
+    def read_head(part, sector_size):
+        return {"disk0-p5": ext4_image(LAPTOP_BOOT_UUID), "disk0-p1": fat32_image()}.get(part.id, bytes(4096))
+
+    def deps():
+        return ScanDeps(ReadOnlyRunner(bcd), lambda: True, bcd.nvram, read_head, fake_mount(esp_root))
+
+    return bcd, esp_root, deps
+
+
+BITLOCKER_OFF = '[{"DriveLetter":"C:","ProtectionStatus":0,"ConversionStatus":0,"EncryptionMethod":0,"VolumeType":0}]'
+BITLOCKER_ON = '[{"DriveLetter":"C:","ProtectionStatus":1,"ConversionStatus":1,"EncryptionMethod":7,"VolumeType":0}]'
+
+
+def fake_mount(root: Path):
+    @contextmanager
+    def mount(runner, esp):
+        yield MountedEsp(root, "Z", temporary=True)
+
+    return mount
+
+
+def scan_deps(esp_root: Path, admin: bool = True, files=None, bitlocker: str = BITLOCKER_ON):
+    """ScanDeps palsu: FakeRunner + ESP di folder temp + NVRAM/superblock sintetis."""
+    from distrohop.windows.scanner import ScanDeps
+
+    fake = FakeRunner()
+    fake.add("ps:disks", fixture_text("disks_laptop.json"))
+    fake.add("bcdedit /enum firmware /v", fixture_text("bcdedit_firmware_synthetic_en.txt"))
+    fake.add("ps:bitlocker", bitlocker)
+    write_tree(esp_root, files if files is not None else laptop_esp_files())
+
+    def read_head(part, sector_size):
+        return {"disk0-p5": ext4_image(BOOT_UUID), "disk0-p1": fat32_image()}.get(part.id, bytes(4096))
+
+    deps = ScanDeps(
+        runner=ReadOnlyRunner(fake),
+        is_admin=lambda: admin,
+        read_nvram=lambda: snapshot_from_raw(nvram_raw_laptop()),
+        read_partition_head=read_head,
+        mount_esp=fake_mount(esp_root),
+    )
+    return deps, fake
 
 
 BOOTMGFW = b"MZ fake Windows Boot Manager Microsoft Corporation"

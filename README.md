@@ -4,16 +4,20 @@ Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → unin
 
 Masalah awalnya: setelah partisi Linux di-wipe, GRUB masih muncul saat boot karena folder bootloader di EFI System Partition (ESP), entri boot di NVRAM, dan partisi pendukung seperti `/boot` tidak ikut terhapus.
 
-## Status: M0 + M1 (scan read-only)
+## Status: M0 + M1 + M2a + M2b (CLI)
 
-Versi ini **hanya membaca**. Belum ada fitur yang mengubah apa pun.
+Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` menghapus entri boot dan folder ESP.**
+Jalankan perintah itu **di VM dulu** (lihat [tests/vm/SCENARIOS.md](tests/vm/SCENARIOS.md)). Di laptop asli, `uninstall` menolak jalan
+kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat sudah dicoba, dan kamu mengonfirmasi bahwa test di VM sudah lolos.
 
 | Milestone | Isi | Status |
 |---|---|---|
 | M0 | Fondasi: Runner, elevasi admin, logging, test | ✅ |
 | M1a | Scan inventaris: disk/partisi, isi ESP, entri boot (`bcdedit`), BitLocker | ✅ |
 | M1b | Scan analisis: NVRAM mentah, header filesystem (fsprobe), reference graph per instalasi | ✅ |
-| M2 | Uninstall EFI (hapus folder & entri boot, dengan backup & pemulihan) | belum |
+| M2a | Preflight, backup per lapisan + verifikasi + salinan USB, dry-run rencana uninstall, `docs/RECOVERY.md` | ✅ |
+| M2b | Eksekusi uninstall EFI (journal, post-check, `restore`), CLI | ✅ (belum dites di VM) |
+| M2c | Wizard uninstall di TUI | belum |
 | M3 | Hapus partisi Linux | belum |
 | M4–M7 | Profil + setup Linux, backup Linux, ISO manager, rilis `.exe` | belum |
 
@@ -47,7 +51,32 @@ python -m venv .venv
 
 # Scan terbatas tanpa admin (hanya daftar partisi)
 .venv\Scripts\python.exe -m distrohop --no-elevate scan
+
+# Dry-run rencana uninstall: tanpa --select tampilkan kandidat, dengan --select tampilkan urutan & perintah persis
+.venv\Scripts\python.exe -m distrohop plan
+.venv\Scripts\python.exe -m distrohop plan --select efi:fedora --select efi:arch
+
+# Preflight + backup per lapisan ke %LOCALAPPDATA%\DistroHop\backups\ dan drive eksternal
+# (flashdisk atau HDD eksternal, disk fisik selain SSD Windows), lalu verifikasi
+.venv\Scripts\python.exe -m distrohop backup --drive E
+
+# Mode coba tanpa USB (backup hanya di C:; belum memenuhi syarat eksekusi M2b)
+.venv\Scripts\python.exe -m distrohop backup --local-only
+
+# Verifikasi ulang folder backup kapan saja (tidak butuh admin)
+.venv\Scripts\python.exe -m distrohop verify-backup E:\DistroHop\backups\<id>
+
+# --- Mengubah sistem: coba di VM dulu ---
+# Jalankan rencana (banyak konfirmasi, terakhir ketik HAPUS)
+.venv\Scripts\python.exe -m distrohop uninstall --select efi:fedora --backup <id>
+# Pulihkan folder ESP / entri boot dari backup
+.venv\Scripts\python.exe -m distrohop restore --backup <id> --esp-item EFI\fedora --boot-entry Fedora
+# Lihat sesi eksekusi, termasuk yang terputus di tengah
+.venv\Scripts\python.exe -m distrohop journal
 ```
+
+Rencana uninstall selalu berurutan supaya laptop tetap bisa boot ke Windows di setiap titik:
+Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
 
 Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroHop\reports\`, `q` keluar.
 Log ada di `%LOCALAPPDATA%\DistroHop\logs\`.
