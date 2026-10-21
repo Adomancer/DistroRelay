@@ -2,44 +2,15 @@
 
 import asyncio
 import json
-from contextlib import contextmanager
 
 from rich.console import Console
 
 from distrohop import render
 from distrohop.tui.app import DistroHopApp
 from distrohop.windows.bootrefs import VERDICT_LEFTOVER
-from distrohop.windows.esp import MountedEsp
-from distrohop.windows.nvram import snapshot_from_raw
-from distrohop.windows.runner import FakeRunner, ReadOnlyRunner
-from distrohop.windows.scanner import ScanDeps, report_to_json, run_scan, save_raw
-from helpers import BOOT_UUID, ext4_image, fat32_image, fixture_text, laptop_esp_files, nvram_raw_laptop, write_tree
-
-BITLOCKER_JSON = '[{"DriveLetter":"C:","ProtectionStatus":1,"ConversionStatus":1,"EncryptionMethod":7,"VolumeType":0}]'
-
-
-def make_deps(tmp_path, admin=True):
-    fake = FakeRunner()
-    fake.add("ps:disks", fixture_text("disks_laptop.json"))
-    fake.add("bcdedit /enum firmware /v", fixture_text("bcdedit_firmware_synthetic_en.txt"))
-    fake.add("ps:bitlocker", BITLOCKER_JSON)
-    write_tree(tmp_path, laptop_esp_files())
-
-    @contextmanager
-    def mount(runner, esp):
-        yield MountedEsp(tmp_path, "Z", temporary=True)
-
-    def read_head(part, sector_size):
-        return {"disk0-p5": ext4_image(BOOT_UUID), "disk0-p1": fat32_image()}.get(part.id, bytes(4096))
-
-    deps = ScanDeps(
-        runner=ReadOnlyRunner(fake),
-        is_admin=lambda: admin,
-        read_nvram=lambda: snapshot_from_raw(nvram_raw_laptop()),
-        read_partition_head=read_head,
-        mount_esp=mount,
-    )
-    return deps, fake
+from distrohop.windows.scanner import report_to_json, run_scan, save_raw
+from helpers import fixture_text
+from helpers import scan_deps as make_deps
 
 
 def test_full_scan_as_admin(tmp_path):

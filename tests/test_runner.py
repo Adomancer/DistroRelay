@@ -62,6 +62,49 @@ def test_read_only_blocks_anything_that_can_change_the_system(args):
         check_read_only(args)
 
 
+def test_read_only_allows_reading_an_exported_store_and_signatures():
+    check_read_only(["bcdedit", "/store", "C:\\backup\\bcd-store.bak", "/enum", "all"])
+    from distrohop.windows.signature import signature_script
+
+    check_read_only(powershell_args(signature_script("Z:\\EFI\\Pop_OS-1234\\file-with-hyphen.efi")))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "rm C:\\Windows\\x",
+        "Get-Disk; del 'C:\\x'",
+        "iex 'Remove-Partition'",
+        "& 'Remove-Partition' -DiskNumber 0",
+        "Mount-DiskImage -ImagePath 'x.iso'",  # tanpa -Access ReadOnly
+    ],
+)
+def test_powershell_aliases_call_operator_and_writable_mounts_are_blocked(script):
+    from distrohop.windows.preflight import M2A_CMDLETS
+    from distrohop.windows.runner import ALLOWED_CMDLETS, check_powershell
+
+    with pytest.raises(ReadOnlyViolation):
+        check_powershell(script, ALLOWED_CMDLETS | M2A_CMDLETS)
+
+
+def test_allow_list_runner_only_allows_export_into_backup_folder(tmp_path):
+    from distrohop.windows.backup import backup_runner
+
+    fake = FakeRunner()
+    fake.add("bcdedit /export *")
+    runner = backup_runner(fake, root=tmp_path / "backups")
+    runner.run(["bcdedit", "/export", str(tmp_path / "backups" / "x" / "bcd-store.bak")])
+    for args in (
+        ["bcdedit", "/export", str(tmp_path / "lain" / "bcd.bak")],
+        ["bcdedit", "/export", str(tmp_path / "backups" / ".." / "keluar.bak")],
+        ["bcdedit", "/delete", "{0b5f2d1e-7a39-11ef-9a6b-806e6f6e6963}"],
+        ["bcdedit", "/set", "{fwbootmgr}", "displayorder", "{bootmgr}", "/addfirst"],
+    ):
+        with pytest.raises(ReadOnlyViolation):
+            runner.run(args)
+    assert len(fake.calls) == 1
+
+
 def test_read_only_runner_blocks_before_running():
     fake = FakeRunner()
     runner = ReadOnlyRunner(fake)

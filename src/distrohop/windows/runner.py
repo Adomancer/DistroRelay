@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 
 @dataclass(frozen=True)
@@ -115,19 +115,33 @@ class SubprocessRunner:
 
 @dataclass
 class FakeRunner:
-    """Runner untuk test: respons ditentukan per `command_key`, dan semua panggilan dicatat."""
+    """Runner untuk test: respons ditentukan per `command_key`, dan semua panggilan dicatat.
+
+    Key yang diakhiri '*' cocok dengan awalan (mis. 'bcdedit /export *'). `effects` dijalankan
+    sebelum respons dikembalikan, untuk meniru efek samping seperti file yang ditulis bcdedit.
+    """
 
     responses: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+    effects: dict[str, Callable[[tuple[str, ...]], None]] = field(default_factory=dict)
     calls: list[tuple[str, ...]] = field(default_factory=list)
 
-    def add(self, key: str, stdout: str = "", returncode: int = 0, stderr: str = "") -> None:
+    def add(self, key: str, stdout: str = "", returncode: int = 0, stderr: str = "", effect=None) -> None:
         self.responses[key] = (returncode, stdout, stderr)
+        if effect is not None:
+            self.effects[key] = effect
+
+    def _match(self, key: str) -> str | None:
+        if key in self.responses:
+            return key
+        return next((k for k in self.responses if k.endswith("*") and key.startswith(k[:-1])), None)
 
     def run(self, args: Sequence[str], *, timeout: float = 120) -> CommandResult:
         self.calls.append(tuple(args))
-        key = command_key(args)
-        if key not in self.responses:
-            return CommandResult(tuple(args), 127, "", f"FakeRunner: tidak ada respons untuk {key!r}")
+        key = self._match(command_key(args))
+        if key is None:
+            return CommandResult(tuple(args), 127, "", f"FakeRunner: tidak ada respons untuk {command_key(args)!r}")
+        if key in self.effects:
+            self.effects[key](tuple(args))
         returncode, stdout, stderr = self.responses[key]
         return CommandResult(tuple(args), returncode, stdout, stderr)
 
@@ -140,6 +154,7 @@ ALLOWED_CMDLETS = frozenset(
         "get-partition",
         "get-volume",
         "get-ciminstance",
+        "get-authenticodesignature",
         "convertto-json",
         "foreach-object",
         "select-object",
@@ -152,6 +167,30 @@ _BCDEDIT_ENUM_ARG = re.compile(r"^(/v|firmware|all|active|\{[0-9a-z-]+\})$", re.
 _DRIVE = re.compile(r"^[a-z]:\\?$", re.IGNORECASE)
 
 
+_SINGLE_QUOTED = re.compile(r"'(?:[^']|'')*'")
+# Alias pengubah/pengeksekusi dan operator pemanggil, yang tidak berbentuk Kata-Kata.
+_DANGEROUS_ALIAS = re.compile(r"\b(rm|del|erase|rd|rmdir|ri|mv|move|ren|rni|cp|cpi|copy|ni|sc|iex|icm|saps|start|kill|spps)\b", re.IGNORECASE)
+_CALL_OPERATOR = re.compile(r"&\s*['\"$({]")
+
+
+def check_powershell(script: str, allowed: frozenset[str] = ALLOWED_CMDLETS) -> None:
+    """Penjaga lapis tambahan untuk script DistroHop sendiri (bukan sandbox untuk script asing)."""
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    # Isi string '...' (path file, dengan ' digandakan) bukan kode, jadi tidak ikut dipindai.
+    code = _SINGLE_QUOTED.sub("''", code)
+    alias = _DANGEROUS_ALIAS.search(code)
+    if alias:
+        raise ReadOnlyViolation(f"Script PowerShell memakai alias yang tidak diizinkan: {alias.group(0)}")
+    if _CALL_OPERATOR.search(code):
+        raise ReadOnlyViolation("Script PowerShell memakai operator pemanggil '&'")
+    used = {m.group(0).lower() for m in _CMDLET.finditer(code)}
+    forbidden = sorted(used - allowed)
+    if forbidden:
+        raise ReadOnlyViolation(f"Script PowerShell memakai cmdlet di luar daftar izin: {forbidden}")
+    if "mount-diskimage" in used and "-access readonly" not in code.lower():
+        raise ReadOnlyViolation("Mount-DiskImage hanya boleh dengan -Access ReadOnly")
+
+
 def check_read_only(args: Sequence[str]) -> None:
     """Lempar `ReadOnlyViolation` kalau perintah bisa mengubah sistem.
 
@@ -162,15 +201,20 @@ def check_read_only(args: Sequence[str]) -> None:
         raise ReadOnlyViolation("Perintah kosong")
     script = decode_powershell(args)
     if script is not None:
-        code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
-        used = {m.group(0).lower() for m in _CMDLET.finditer(code)}
-        forbidden = sorted(used - ALLOWED_CMDLETS)
-        if forbidden:
-            raise ReadOnlyViolation(f"Script PowerShell memakai cmdlet di luar daftar read-only: {forbidden}")
+        check_powershell(script)
         return
     exe = _exe_name(args[0])
     rest = [a.lower() for a in args[1:]]
     if exe == "bcdedit" and rest[:1] == ["/enum"] and all(_BCDEDIT_ENUM_ARG.match(a) for a in rest[1:]):
+        return
+    # Membaca store BCD hasil export (file backup), bukan store sistem.
+    if (
+        exe == "bcdedit"
+        and len(rest) >= 3
+        and rest[0] == "/store"
+        and rest[2] == "/enum"
+        and all(_BCDEDIT_ENUM_ARG.match(a) for a in rest[3:])
+    ):
         return
     if exe == "manage-bde" and rest[:1] == ["-status"]:
         return
@@ -185,4 +229,29 @@ class ReadOnlyRunner:
 
     def run(self, args: Sequence[str], *, timeout: float = 120) -> CommandResult:
         check_read_only(args)
+        return self.inner.run(args, timeout=timeout)
+
+
+@dataclass
+class AllowListRunner:
+    """Read-only, ditambah perintah yang didaftarkan eksplisit untuk satu tahap kerja.
+
+    Setiap tahap (mis. backup M2a) memberi daftarnya sendiri, jadi perintah pengubah sistem
+    tidak bisa "ikut terbawa" ke tahap lain.
+    """
+
+    inner: Runner
+    extra_cmdlets: frozenset[str] = frozenset()
+    rules: tuple[Callable[[Sequence[str]], bool], ...] = ()
+
+    def run(self, args: Sequence[str], *, timeout: float = 120) -> CommandResult:
+        script = decode_powershell(args)
+        if script is not None:
+            check_powershell(script, ALLOWED_CMDLETS | self.extra_cmdlets)
+        else:
+            try:
+                check_read_only(args)
+            except ReadOnlyViolation:
+                if not any(rule(args) for rule in self.rules):
+                    raise ReadOnlyViolation(f"Perintah tidak ada di daftar izin tahap ini: {command_key(args)}")
         return self.inner.run(args, timeout=timeout)

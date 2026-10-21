@@ -184,6 +184,85 @@ def esp_nodes(report: ScanReport) -> list[Node]:
     return [root]
 
 
+CHECK_STYLES = {"ok": "green", "peringatan": "yellow", "gagal": "bold red", "perlu konfirmasi": "bold yellow"}
+
+
+def preflight_text(result) -> Text:
+    text = Text("Preflight\n", style="bold")
+    for check in result.checks:
+        text.append(f"  [{check.status}] ", style=CHECK_STYLES.get(check.status, ""))
+        text.append(f"{check.title}: ", style="bold")
+        text.append(f"{check.message}\n")
+        for detail in check.details:
+            text.append(f"      {detail}\n", style="dim")
+    return text
+
+
+def backup_text(result) -> Text:
+    text = Text("Backup ", style="bold")
+    text.append(f"{result.backup_id}\n", style="bold")
+    text.append(f"  Lokal: {result.local_dir}\n")
+    text.append(f"  USB:   {result.usb_dir or '-'}\n")
+    for f in result.files:
+        text.append(f"    {f.name:<24} {human_size(f.size):>9}  sha256 {f.sha256[:16]}…\n", style="dim")
+    text.append(f"  Isi ESP: {len(result.esp_files)} file", style="dim")
+    if result.skipped:
+        text.append(f", {len(result.skipped)} dilewati karena dikunci Windows ({', '.join(result.skipped)})", style="dim")
+    text.append("\n\nVerifikasi\n", style="bold")
+    for check in result.verifications:
+        text.append("  [ok]    " if check.ok else "  [GAGAL] ", style="green" if check.ok else "bold red")
+        text.append(f"{check.name}: {check.message}\n")
+    if not result.ok:
+        text.append("\nBackup BELUM lengkap: lihat verifikasi yang gagal.\n", style="bold red")
+    elif result.local_only:
+        text.append("\nBackup lokal lengkap dan terverifikasi.\n", style="bold green")
+        text.append(
+            "Mode coba (--local-only): belum ada salinan di USB, jadi backup ini BELUM memenuhi syarat "
+            "eksekusi M2b. Kalau SSD bermasalah atau Windows tidak bisa boot, salinan di C: ikut tidak terjangkau.\n",
+            style="yellow",
+        )
+    else:
+        text.append("\nBackup lengkap dan terverifikasi (lokal + USB).\n", style="bold green")
+    return text
+
+
+def candidates_text(analysis) -> Text:
+    from .windows.uninstall_plan import SELECTABLE_KINDS
+
+    text = Text("Kandidat yang bisa dipilih (tidak ada yang dipilih otomatis)\n", style="bold")
+    for inst in analysis.installations:
+        if inst.kind not in SELECTABLE_KINDS:
+            continue
+        text.append(f"\n  {inst.key}", style="bold cyan")
+        text.append(f"  {inst.name} — ")
+        text.append(f"{inst.verdict}\n", style=VERDICT_STYLES.get(inst.verdict, ""))
+        for comp in inst.components:
+            text.append(f"      {comp.ref:<28} {comp.label}\n", style="dim")
+    text.append(
+        "\nPilih dengan --select <key instalasi atau ref komponen>, boleh diulang. "
+        "Contoh: distrohop plan --select efi:fedora --select efi:arch\n"
+    )
+    return text
+
+
+def plan_text(plan) -> Text:
+    text = Text("Rencana uninstall (DRY-RUN: tidak ada yang dijalankan)\n", style="bold")
+    if not plan.actions:
+        text.append("  Tidak ada aksi.\n", style="dim")
+    for number, action in enumerate(plan.actions, 1):
+        text.append(f"\n  {number}. {action.title}\n", style="bold")
+        for command in action.commands:
+            text.append(f"       $ {command}\n", style="cyan")
+        for detail in action.details:
+            text.append(f"       {detail}\n", style="dim")
+    for label, items, style in (("Diblokir", plan.blocked, "red"), ("Peringatan", plan.warnings, "yellow")):
+        if items:
+            text.append(f"\n{label}\n", style=f"bold {style}")
+            for item in items:
+                text.append(f"  • {item}\n", style=style)
+    return text
+
+
 def info_text(report: ScanReport, log_path: str | None = None) -> Text:
     text = Text()
     text.append("Status\n", style="bold")

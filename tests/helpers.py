@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import struct
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from distrohop.windows import disks
-from distrohop.windows.esp import scan_esp
+from distrohop.windows.esp import MountedEsp, scan_esp
+from distrohop.windows.nvram import snapshot_from_raw
+from distrohop.windows.runner import FakeRunner, ReadOnlyRunner
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -225,6 +228,41 @@ def write_tree(root: Path, files: dict[str, bytes | str]) -> None:
 def fake_esp(root: Path, inventory: disks.DiskInventory, files: dict[str, bytes | str]):
     write_tree(root, files)
     return scan_esp(root, inventory.esp())
+
+
+BITLOCKER_OFF = '[{"DriveLetter":"C:","ProtectionStatus":0,"ConversionStatus":0,"EncryptionMethod":0,"VolumeType":0}]'
+BITLOCKER_ON = '[{"DriveLetter":"C:","ProtectionStatus":1,"ConversionStatus":1,"EncryptionMethod":7,"VolumeType":0}]'
+
+
+def fake_mount(root: Path):
+    @contextmanager
+    def mount(runner, esp):
+        yield MountedEsp(root, "Z", temporary=True)
+
+    return mount
+
+
+def scan_deps(esp_root: Path, admin: bool = True, files=None, bitlocker: str = BITLOCKER_ON):
+    """ScanDeps palsu: FakeRunner + ESP di folder temp + NVRAM/superblock sintetis."""
+    from distrohop.windows.scanner import ScanDeps
+
+    fake = FakeRunner()
+    fake.add("ps:disks", fixture_text("disks_laptop.json"))
+    fake.add("bcdedit /enum firmware /v", fixture_text("bcdedit_firmware_synthetic_en.txt"))
+    fake.add("ps:bitlocker", bitlocker)
+    write_tree(esp_root, files if files is not None else laptop_esp_files())
+
+    def read_head(part, sector_size):
+        return {"disk0-p5": ext4_image(BOOT_UUID), "disk0-p1": fat32_image()}.get(part.id, bytes(4096))
+
+    deps = ScanDeps(
+        runner=ReadOnlyRunner(fake),
+        is_admin=lambda: admin,
+        read_nvram=lambda: snapshot_from_raw(nvram_raw_laptop()),
+        read_partition_head=read_head,
+        mount_esp=fake_mount(esp_root),
+    )
+    return deps, fake
 
 
 BOOTMGFW = b"MZ fake Windows Boot Manager Microsoft Corporation"

@@ -4,16 +4,17 @@ Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → unin
 
 Masalah awalnya: setelah partisi Linux di-wipe, GRUB masih muncul saat boot karena folder bootloader di EFI System Partition (ESP), entri boot di NVRAM, dan partisi pendukung seperti `/boot` tidak ikut terhapus.
 
-## Status: M0 + M1 (scan read-only)
+## Status: M0 + M1 + M2a (belum ada yang mengubah sistem)
 
-Versi ini **hanya membaca**. Belum ada fitur yang mengubah apa pun.
+Versi ini **belum menghapus apa pun**. Scan dan dry-run hanya membaca, sedangkan backup hanya menulis file ke folder backup dan USB.
 
 | Milestone | Isi | Status |
 |---|---|---|
 | M0 | Fondasi: Runner, elevasi admin, logging, test | ✅ |
 | M1a | Scan inventaris: disk/partisi, isi ESP, entri boot (`bcdedit`), BitLocker | ✅ |
 | M1b | Scan analisis: NVRAM mentah, header filesystem (fsprobe), reference graph per instalasi | ✅ |
-| M2 | Uninstall EFI (hapus folder & entri boot, dengan backup & pemulihan) | belum |
+| M2a | Preflight, backup per lapisan + verifikasi + salinan USB, dry-run rencana uninstall, `docs/RECOVERY.md` | ✅ |
+| M2b | Eksekusi uninstall EFI (journal, post-check, menu Pulihkan) | belum |
 | M3 | Hapus partisi Linux | belum |
 | M4–M7 | Profil + setup Linux, backup Linux, ISO manager, rilis `.exe` | belum |
 
@@ -47,7 +48,24 @@ python -m venv .venv
 
 # Scan terbatas tanpa admin (hanya daftar partisi)
 .venv\Scripts\python.exe -m distrohop --no-elevate scan
+
+# Dry-run rencana uninstall: tanpa --select tampilkan kandidat, dengan --select tampilkan urutan & perintah persis
+.venv\Scripts\python.exe -m distrohop plan
+.venv\Scripts\python.exe -m distrohop plan --select efi:fedora --select efi:arch
+
+# Preflight + backup per lapisan ke %LOCALAPPDATA%\DistroHop\backups\ dan drive eksternal
+# (flashdisk atau HDD eksternal, disk fisik selain SSD Windows), lalu verifikasi
+.venv\Scripts\python.exe -m distrohop backup --drive E
+
+# Mode coba tanpa USB (backup hanya di C:; belum memenuhi syarat eksekusi M2b)
+.venv\Scripts\python.exe -m distrohop backup --local-only
+
+# Verifikasi ulang folder backup kapan saja (tidak butuh admin)
+.venv\Scripts\python.exe -m distrohop verify-backup E:\DistroHop\backups\<id>
 ```
+
+Rencana uninstall selalu berurutan supaya laptop tetap bisa boot ke Windows di setiap titik:
+Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
 
 Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroHop\reports\`, `q` keluar.
 Log ada di `%LOCALAPPDATA%\DistroHop\logs\`.
