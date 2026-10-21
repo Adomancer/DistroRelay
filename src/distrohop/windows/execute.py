@@ -26,9 +26,10 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from .backup import sha256_file, verify_backup_dir
-from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware
+from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware, merge_entries
 from .esp import norm_path
 from .journal import Journal
+from .nvram import NvramSnapshot
 from .preflight import FAIL, PreflightResult
 from .runner import AllowListRunner, Runner, powershell_args
 from .scanner import ScanReport
@@ -183,6 +184,7 @@ class _Context:
     esp_root: Path
     hashes: dict[str, str]
     signature_of: Callable[[Runner, Path], Signature]
+    read_nvram: Callable[[], NvramSnapshot] | None = None
 
 
 def _suspend_bitlocker(action: PlannedAction, ctx: _Context) -> str:
@@ -228,27 +230,57 @@ def _restore_fallback(action: PlannedAction, ctx: _Context) -> str:
     return f"{FALLBACK} sekarang identik dengan bootmgfw.efi (sha256 {source_hash[:16]}…)"
 
 
+def _current_entries(ctx: _Context):
+    if ctx.read_nvram is None:
+        raise ExecutionError("NVRAM tidak bisa dibaca ulang, jadi entri tidak bisa dipastikan sebelum dihapus")
+    config, _ = load_firmware(ctx.runner)
+    entries, _ = merge_entries(config, ctx.read_nvram())
+    return config, entries
+
+
 def _delete_boot_entry(action: PlannedAction, ctx: _Context) -> str:
     bcd_id = (action.data.get("bcd_id") or "").lower()
     if not bcd_id or bcd_id in WELL_KNOWN_IDS:
         raise ExecutionError(f"GUID entri tidak boleh dihapus: {bcd_id or '(kosong)'}")
-    config, _ = load_firmware(ctx.runner)
-    entry = config.find(bcd_id)
-    if entry is None:
+    number = action.data.get("nvram_number")
+    if number is None:
+        raise ExecutionError("Rencana tidak mencatat nomor Boot#### entri ini; susun ulang rencananya")
+    config, entries = _current_entries(ctx)
+    if config.find(bcd_id) is None:
         raise ExecutionError("Entri tidak ditemukan lagi; kondisi berubah sejak rencana dibuat")
+    entry = next((e for e in entries if (e.bcd_id or "").lower() == bcd_id), None)
+    label = f"Boot{number:04X}"
+    if entry is None or entry.nvram_number != number:
+        now = entry.label if entry else "tidak ada"
+        raise ExecutionError(f"Objek {bcd_id} sekarang dipasangkan dengan {now}, bukan {label}; kondisi berubah")
     if entry.is_windows_boot_manager:
         raise ExecutionError("Entri ini adalah Windows Boot Manager")
-    if (entry.description or "") != (action.data.get("description") or "") or (entry.path or "").lower() != (
-        action.data.get("path") or ""
-    ).lower():
+    if not entry.confirmed:
+        why = "; ".join(entry.conflicts) or f"hanya terlihat di {' + '.join(entry.sources)}"
+        raise ExecutionError(f"Entri tidak terkonfirmasi di NVRAM + bcdedit: {why}")
+    if not _same_text(entry.description, action.data.get("description")) or not _same_text(
+        entry.path, action.data.get("path")
+    ):
         raise ExecutionError(f"Entri berubah sejak rencana dibuat: sekarang '{entry.description}' → {entry.path}")
+    others = {e.nvram_number for e in entries if e.nvram_number is not None and e.nvram_number != number}
+
     result = ctx.runner.run(["bcdedit", "/delete", bcd_id])
     if not result.ok:
         raise ExecutionError(f"bcdedit /delete gagal: {result.output() or result.returncode}")
-    config, _ = load_firmware(ctx.runner)
+    config, entries = _current_entries(ctx)
     if config.find(bcd_id) is not None:
         raise ExecutionError("Entri masih ada setelah dihapus")
-    return f"Entri '{entry.description}' ({bcd_id}) dihapus (dicek ulang)"
+    remaining = {e.nvram_number for e in entries if e.nvram_number is not None}
+    if number in remaining:
+        raise ExecutionError(f"Objek BCD terhapus, tapi {label} masih ada di NVRAM")
+    gone = sorted(others - remaining)
+    if gone:
+        raise ExecutionError("Entri lain ikut hilang dari NVRAM: " + ", ".join(f"Boot{n:04X}" for n in gone))
+    return f"Entri '{entry.description}' ({label}, {bcd_id}) dihapus (dicek ulang di NVRAM + bcdedit)"
+
+
+def _same_text(a: str | None, b: str | None) -> bool:
+    return (a or "").strip().casefold() == (b or "").strip().casefold()
 
 
 def _delete_esp_item(action: PlannedAction, ctx: _Context) -> str:
@@ -285,6 +317,7 @@ def execute_plan(
     journal: Journal,
     suspend_bitlocker: bool = False,
     signature_of: Callable[[Runner, Path], Signature] = check_signature,
+    read_nvram: Callable[[], NvramSnapshot] | None = None,
     progress: Callable[[str], None] | None = None,
     fail_after: str | None = None,
 ) -> ExecutionResult:
@@ -299,7 +332,7 @@ def execute_plan(
                 ["Suspend-BitLocker -MountPoint C: -RebootCount 1"],
             ),
         )
-    ctx = _Context(runner, Path(esp_root), manifest_hashes(manifest), signature_of)
+    ctx = _Context(runner, Path(esp_root), manifest_hashes(manifest), signature_of, read_nvram)
     result = ExecutionResult(session=journal.path.stem, journal_path=str(journal.path))
 
     for number, action in enumerate(actions, 1):

@@ -228,7 +228,7 @@ def _run_uninstall_command(args: argparse.Namespace) -> int:
     from rich.console import Console
 
     from . import render
-    from .windows import disks, esp
+    from .windows import disks, esp, nvram
     from .windows.backup import backup_runner, backups_root
     from .windows.execute import (
         DEV_FLAG_ENV,
@@ -324,6 +324,7 @@ def _run_uninstall_command(args: argparse.Namespace) -> int:
             manifest=gate.manifest,
             journal=journal,
             suspend_bitlocker=any(v.needs_recovery_key for v in report.bitlocker or []),
+            read_nvram=nvram.read_nvram,
             progress=lambda m: status.update(m),
             fail_after=fail_after,
         )

@@ -43,8 +43,10 @@ def preflight_ok():
     )
 
 
-def world(tmp_path, select=SELECT, local_only=False):
+def world(tmp_path, select=SELECT, local_only=False, setup=None):
     bcd, esp_root, deps = laptop_world(tmp_path)
+    if setup:
+        setup(bcd)
     report = run_scan(deps())
     refs, unknown = expand_selection(report.analysis, select)
     assert unknown == []
@@ -75,6 +77,7 @@ def gate_for(tmp_path, plan, report, backup, confirmed=("emergency-usb",), exter
 
 def run(tmp_path, bcd, esp_root, plan, manifest, **kwargs):
     journal = Journal.start(tmp_path / "journal", "sesi-test", {})
+    kwargs.setdefault("read_nvram", bcd.nvram)
     result = execute_plan(plan, runner=execution_runner(bcd, plan), esp_root=esp_root, manifest=manifest, journal=journal, **kwargs)
     return result, journal
 
@@ -241,3 +244,77 @@ def test_restore_folders_and_entries_after_uninstall(tmp_path):
     assert not restore_boot_entry(runner, created, windows).ok
     with pytest.raises(ReadOnlyViolation):
         runner.run(["bcdedit", "/delete", BOOTMGR_ID])
+
+
+# --- Objek BCD basi & entri yang tidak terkonfirmasi (temuan uji VM 2026-10-22) -----------------------------
+
+STALE = "{02faf3b2-cd66-11f1-9d46-806e6f6e6963}"
+USB = "{41acf87b-38e5-11f1-8536-806e6f6e6963}"
+
+
+def stale_vbox_disk(bcd):
+    """Seperti di VM: objek sintetis masih mencatat path Fedora, padahal Boot#### pasangannya kini entri disk."""
+    bcd.add(STALE, "UEFI VBOX HARDDISK VB86621e4c-074226d4", "\\EFI\\fedora\\shimx64.efi")
+    bcd.nvram_hardware.add(STALE)
+
+
+def test_stale_bcd_object_is_paired_by_position_and_never_planned(tmp_path):
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path, setup=stale_vbox_disk)
+    stale = next(e for e in report.boot_entries if e.bcd_id == STALE)
+    assert stale.sources == ["NVRAM", "bcdedit"] and stale.path is None and not stale.confirmed
+    assert any("path di bcdedit \\EFI\\fedora\\shimx64.efi" in c for c in stale.conflicts)
+    assert STALE not in {a.data.get("bcd_id") for a in plan.actions}
+
+    gate = gate_for(tmp_path, plan, report, backup)
+    assert gate.ok, gate.problems
+    result, _ = run(tmp_path, bcd, esp_root, plan, gate.manifest)
+    assert result.completed, result.stopped
+    assert STALE in bcd.entries
+    checks = post_check(plan, gate.manifest, report, run_scan(deps()))
+    assert all(c.ok for c in checks), [c for c in checks if not c.ok]
+
+
+def test_entry_seen_only_in_bcdedit_is_blocked(tmp_path):
+    orphan = "{11111111-2222-4333-8444-555555555555}"
+
+    def setup(bcd):
+        bcd.add(orphan, "Fedora", "\\EFI\\fedora\\shimx64.efi", in_order=False)
+        bcd.bcd_only.add(orphan)
+
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path, setup=setup)
+    assert orphan not in {a.data.get("bcd_id") for a in plan.actions}
+    assert FEDORA in {a.data.get("bcd_id") for a in plan.actions}  # Fedora asli tetap dipasangkan dengan benar
+    assert any("hanya terlihat di bcdedit" in b for b in plan.blocked)
+    gate = gate_for(tmp_path, plan, report, backup)
+    assert not gate.ok  # blokir selain M3 = rencana tidak boleh jalan
+
+
+def test_entry_repaired_differently_at_execution_stops_before_delete(tmp_path):
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path)
+    gate = gate_for(tmp_path, plan, report, backup)
+    assert gate.ok, gate.problems
+    bcd.nvram_hardware.add(FEDORA)  # setelah rencana dibuat, Boot#### pasangan objek Fedora berubah isi
+
+    result, _ = run(tmp_path, bcd, esp_root, plan, gate.manifest)
+    assert not result.completed
+    assert "tidak terkonfirmasi" in result.stopped
+    assert FEDORA in bcd.entries and ARCH in bcd.entries
+
+
+def test_other_entry_disappearing_with_a_delete_stops_execution(tmp_path):
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path)
+    gate = gate_for(tmp_path, plan, report, backup)
+    bcd.collateral[FEDORA] = USB  # Windows ternyata menghapus Boot#### lain bersama objek ini
+
+    result, _ = run(tmp_path, bcd, esp_root, plan, gate.manifest)
+    assert not result.completed
+    assert "Entri lain ikut hilang" in result.stopped
+    assert ARCH in bcd.entries  # langkah berikutnya tidak dijalankan
+
+
+def test_execution_refuses_to_delete_without_nvram(tmp_path):
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path)
+    gate = gate_for(tmp_path, plan, report, backup)
+    result, _ = run(tmp_path, bcd, esp_root, plan, gate.manifest, read_nvram=None)
+    assert not result.completed and "NVRAM tidak bisa dibaca ulang" in result.stopped
+    assert FEDORA in bcd.entries

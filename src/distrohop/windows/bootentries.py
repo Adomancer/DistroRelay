@@ -181,6 +181,14 @@ class BootEntry:
     active: bool | None
     sources: list[str]
     device: str | None
+    # Isi bcdedit yang berbeda dari NVRAM. Objek BCD bisa basi: firmware menomori ulang Boot####,
+    # Windows memasangkan objeknya ke entri lain, tapi path lama masih tercatat di BCD.
+    conflicts: list[str] = field(default_factory=list)
+
+    @property
+    def confirmed(self) -> bool:
+        """Terlihat di NVRAM dan bcdedit dengan isi yang sama: aman dipakai sebagai target /delete."""
+        return "NVRAM" in self.sources and "bcdedit" in self.sources and not self.conflicts
 
     @property
     def label(self) -> str:
@@ -206,6 +214,8 @@ def _match_bcd(fw: FirmwareConfig, nv: NvramSnapshot, unmatched_bcd: list) -> di
        {fwbootmgr} adalah cermin BootOrder, jadi posisinya sama.
     2. Nama + path sama. Kalau kandidatnya lebih dari satu, pilih yang posisinya sejajar.
     3. Tanpa path: nama sama, hanya kalau kandidatnya tepat satu (atau satu yang posisinya sejajar).
+    4. Posisi sejajar saja. Ini pasangan yang dipakai Windows sendiri; isinya boleh berbeda (objek BCD basi),
+       dan perbedaannya dicatat sebagai konflik oleh `merge_entries`.
     Tiap aturan dijalankan untuk semua entri dulu sebelum aturan berikutnya, supaya bukti lemah pada
     satu entri tidak merebut objek yang punya bukti kuat untuk entri lain.
     """
@@ -233,8 +243,11 @@ def _match_bcd(fw: FirmwareConfig, nv: NvramSnapshot, unmatched_bcd: list) -> di
         found = [e for e in unmatched_bcd if _same(e.description, option.description) and not e.path]
         return found if len(found) == 1 else [e for e in found if aligned(number, e)]
 
+    def by_position(number, option):
+        return [e for e in unmatched_bcd if aligned(number, e)]
+
     matches: dict[int, object] = {}
-    for rule in (by_object, by_name_and_path, by_name_without_path):
+    for rule in (by_object, by_name_and_path, by_name_without_path, by_position):
         for number in sorted(nv.options):
             if number in matches:
                 continue
@@ -244,6 +257,17 @@ def _match_bcd(fw: FirmwareConfig, nv: NvramSnapshot, unmatched_bcd: list) -> di
                 matches[number] = match
                 unmatched_bcd.remove(match)
     return matches
+
+
+def _conflicts(match, option) -> list[str]:
+    found = []
+    if option.description and not _same(match.description, option.description):
+        found.append(f"nama di bcdedit '{match.description}', di NVRAM '{option.description.strip()}'")
+    if (match.path or "").lower() != (option.file_path or "").lower():
+        found.append(
+            f"path di bcdedit {match.path or '(tidak ada)'}, di NVRAM {option.file_path or '(tidak ada)'}"
+        )
+    return found
 
 
 def merge_entries(fw: FirmwareConfig | None, nv: NvramSnapshot | None) -> tuple[list[BootEntry], list[str]]:
@@ -258,11 +282,13 @@ def merge_entries(fw: FirmwareConfig | None, nv: NvramSnapshot | None) -> tuple[
             option = nv.options[number]
             match = matches.get(number)
             sources = ["NVRAM", "bcdedit"] if match else ["NVRAM"]
+            conflicts = _conflicts(match, option) if match else []
             entries.append(
                 BootEntry(
                     key=f"nv:{number:04X}",
                     description=option.description or (match.description if match else "") or option.label,
-                    path=option.file_path or (match.path if match else None),
+                    # Yang dijalankan firmware adalah isi NVRAM; path di bcdedit bisa basi.
+                    path=option.file_path,
                     partition_guid=option.partition_guid,
                     bcd_id=match.identifier if match else option.bcd_object,
                     nvram_number=number,
@@ -270,10 +296,13 @@ def merge_entries(fw: FirmwareConfig | None, nv: NvramSnapshot | None) -> tuple[
                     active=option.active,
                     sources=sources,
                     device=option.device_summary or None,
+                    conflicts=conflicts,
                 )
             )
             if fw is not None and match is None:
                 notes.append(f"Entri {option.label} '{option.description}' terlihat di NVRAM tapi tidak di bcdedit")
+            for conflict in conflicts:
+                notes.append(f"Entri {option.label} ({match.identifier}): {conflict}")
 
     for entry in unmatched_bcd:
         order = fw.display_order.index(entry.identifier) if entry.identifier in fw.display_order else None

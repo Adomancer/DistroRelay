@@ -105,6 +105,25 @@ def test_merge_duplicate_nvram_entries_for_one_bcd_object_follow_boot_order():
     assert all(e.sources == ["NVRAM", "bcdedit"] for e in entries)
 
 
+def test_merge_stale_bcd_object_pairs_by_position_and_keeps_nvram_path():
+    # Data asli VM sebelum uninstall 2026-10-22: {02faf3b2} masih mencatat path Fedora, padahal Windows sudah
+    # memasangkannya ke Boot0004 "UEFI VBOX HARDDISK" (posisi 7 di BootOrder dan displayorder).
+    config = parse_firmware(fixture_text("bcdedit_firmware_vm_stale.txt"))
+    snapshot = snapshot_from_raw(json.loads(fixture_text("nvram_vm_stale.json")))
+    entries, notes = merge_entries(config, snapshot)
+    by_label = {e.label: e for e in entries}
+
+    disk = by_label["Boot0004"]
+    assert disk.bcd_id == "{02faf3b2-cd66-11f1-9d46-806e6f6e6963}"
+    assert disk.path is None and not disk.confirmed
+    assert disk.conflicts == ["path di bcdedit \\EFI\\fedora\\shimx64.efi, di NVRAM (tidak ada)"]
+    assert all(e.label.startswith("Boot") for e in entries)  # tidak ada lagi entri "hanya di bcdedit"
+    assert notes == ["Entri Boot0004 ({02faf3b2-cd66-11f1-9d46-806e6f6e6963}): " + disk.conflicts[0]]
+
+    fedora = [e for e in entries if e.path == "\\EFI\\fedora\\shimx64.efi"]
+    assert {e.label for e in fedora} == {"Boot0005", "Boot0007"} and all(e.confirmed for e in fedora)
+
+
 def test_merge_reports_mismatches():
     config = parse_firmware(fixture_text("bcdedit_firmware_synthetic_en.txt"))
     raw = nvram_raw_laptop()
