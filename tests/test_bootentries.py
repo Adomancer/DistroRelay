@@ -1,3 +1,5 @@
+import json
+
 from distrohop.windows.bootentries import BOOTMGR_ID, merge_entries, parse_firmware
 from distrohop.windows.nvram import parse_load_option, snapshot_from_raw
 from helpers import ESP_GUID, WINDOWS_BCD, fixture_text, nvram_raw_laptop
@@ -84,6 +86,23 @@ def test_merge_matches_both_sources_and_uses_nvram_order():
     assert fedora.order == 0 and fedora.bcd_id == FEDORA_BCD and fedora.sources == ["NVRAM", "bcdedit"]
     assert windows.is_windows_boot_manager and windows.bcd_id == BOOTMGR_ID and windows.order == 1
     assert pxe.bcd_id == PXE_BCD and pxe.path is None
+
+
+def test_merge_duplicate_nvram_entries_for_one_bcd_object_follow_boot_order():
+    # Data asli VM: setelah reboot ada dua Boot#### "Fedora" dengan BCDOBJECT yang sama. Windows memasangkan
+    # objek itu dengan entri di posisi yang sejajar (Boot0006); yang lain diberi ID sintetis ...806e6f6e6963.
+    config = parse_firmware(fixture_text("bcdedit_firmware_vm_dup.txt"))
+    snapshot = snapshot_from_raw(json.loads(fixture_text("nvram_vm_dup.json")))
+    assert snapshot.options[4].bcd_object == snapshot.options[6].bcd_object == "{e4173ee0-cddc-11f1-99d6-f0ee4d085743}"
+
+    entries, notes = merge_entries(config, snapshot)
+    assert notes == []
+    by_label = {e.label: e for e in entries}
+    assert by_label["Boot0006"].bcd_id == "{e4173ee0-cddc-11f1-99d6-f0ee4d085743}"
+    assert by_label["Boot0004"].bcd_id == "{02faf3b2-cd66-11f1-9d46-806e6f6e6963}"
+    assert by_label["Boot0007"].bcd_id == "{e4173ee1-cddc-11f1-99d6-f0ee4d085743}"
+    assert [e.label for e in entries][:4] == ["Boot0007", "Boot0006", "Boot0004", "Boot0003"]
+    assert all(e.sources == ["NVRAM", "bcdedit"] for e in entries)
 
 
 def test_merge_reports_mismatches():
