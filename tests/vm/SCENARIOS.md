@@ -30,6 +30,30 @@ jadi VM menurunkan risiko tapi tidak menghapusnya: dry-run + post-check di lapto
 | 9 | `RestoreEspFiles` + `RestoreBootEntry` + `RestorePartition` setelah skenario 1 | Linux bisa boot lagi | M2b, M3 | [ ] |
 | 10 | NVRAM di-reset (hapus file `.nvram` VM) setelah uninstall | Boot ke Windows lewat fallback, dengan dan tanpa `RestoreFallbackToWindows` | M2b | [ ] |
 
+## Cara menjalankan di VM (M2b)
+
+Di dalam VM Windows (dual-boot dengan Linux), clone repo, buat venv, lalu:
+
+```powershell
+# 1. Backup dengan salinan ke drive eksternal (di VM: virtual disk kedua, misal E:)
+.venv\Scripts\python.exe -m distrohop backup --drive E
+
+# 2. Lihat kandidat & rencana
+.venv\Scripts\python.exe -m distrohop plan
+.venv\Scripts\python.exe -m distrohop plan --select efi:fedora
+
+# 3. Jalankan (jawab "vm" saat ditanya)
+.venv\Scripts\python.exe -m distrohop uninstall --select efi:fedora --backup <ID>
+
+# Skenario 7 (crash di tengah): hanya aktif kalau dua variabel ini di-set
+$env:DISTROHOP_DEV = "1"; $env:DISTROHOP_FAIL_AFTER = "3"
+.venv\Scripts\python.exe -m distrohop uninstall --select efi:fedora --backup <ID>
+.venv\Scripts\python.exe -m distrohop journal
+
+# Skenario 9 (pulihkan)
+.venv\Scripts\python.exe -m distrohop restore --backup <ID> --esp-item EFI\fedora --boot-entry Fedora
+```
+
 ## Khusus M2a (sudah bisa dicoba sekarang)
 
 - [ ] `distrohop backup --usb <huruf>` di VM: semua verifikasi `[ok]`, folder `esp\` di USB lengkap

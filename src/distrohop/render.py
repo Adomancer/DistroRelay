@@ -263,6 +263,64 @@ def plan_text(plan) -> Text:
     return text
 
 
+def verifications_text(title: str, checks) -> Text:
+    text = Text(f"{title}\n", style="bold")
+    for check in checks:
+        text.append("  [ok]    " if check.ok else "  [GAGAL] ", style="green" if check.ok else "bold red")
+        text.append(f"{check.name}: {check.message}\n")
+    return text
+
+
+def gate_text(gate) -> Text:
+    text = Text("Gerbang sebelum eksekusi\n", style="bold")
+    if gate.local_dir:
+        text.append(f"  Backup lokal:     {gate.local_dir}\n", style="dim")
+    if gate.external_dir:
+        text.append(f"  Backup eksternal: {gate.external_dir}\n", style="dim")
+    for note in gate.notes:
+        text.append(f"  • {note}\n", style="dim")
+    if gate.ok:
+        text.append("  Semua syarat terpenuhi.\n", style="bold green")
+    for problem in gate.problems:
+        text.append(f"  [GAGAL] {problem}\n", style="bold red")
+    return text
+
+
+def execution_text(result) -> Text:
+    text = Text(f"Eksekusi (sesi {result.session})\n", style="bold")
+    for step in result.steps:
+        text.append(f"  {step.step}. ", style="bold")
+        text.append("[ok]    " if step.ok else "[GAGAL] ", style="green" if step.ok else "bold red")
+        text.append(f"{step.title}: {step.message}\n")
+    if result.completed:
+        text.append("  Semua langkah selesai.\n", style="bold green")
+    elif result.stopped:
+        text.append(f"  {result.stopped}\n  Langkah sesudahnya TIDAK dijalankan.\n", style="bold red")
+    text.append(f"  Journal: {result.journal_path}\n", style="dim")
+    return text
+
+
+def journal_text(sessions) -> Text:
+    text = Text("Sesi eksekusi\n", style="bold")
+    if not sessions:
+        text.append("  Belum ada.\n", style="dim")
+    for s in sessions:
+        if not s.finished:
+            status, style = "TERPUTUS", "bold yellow"
+        elif s.ok:
+            status, style = "selesai", "green"
+        else:
+            status, style = "berhenti karena gagal", "red"
+        text.append(f"  {s.path.stem}  ", style="bold")
+        text.append(f"{status}\n", style=style)
+        if s.unfinished_step is not None:
+            u = s.unfinished_step
+            text.append(f"      Terputus saat langkah {u.step} ({u.kind} {u.ref or ''}) sedang berjalan\n", style="yellow")
+        elif s.last_step is not None:
+            text.append(f"      Langkah terakhir: {s.last_step.step} ({s.last_step.kind}) {s.last_step.status}\n", style="dim")
+    return text
+
+
 def info_text(report: ScanReport, log_path: str | None = None) -> Text:
     text = Text()
     text.append("Status\n", style="bold")

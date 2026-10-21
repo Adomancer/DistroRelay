@@ -28,6 +28,7 @@ class PlannedAction:
     commands: list[str]
     details: list[str] = field(default_factory=list)
     ref: str | None = None
+    data: dict = field(default_factory=dict)  # data terstruktur untuk eksekusi (GUID, path); bukan teks tampilan
 
 
 @dataclass
@@ -137,6 +138,7 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
                         "Dijalankan sebelum entri & folder dihapus",
                     ],
                     fallback.path,
+                    {"source": "EFI\\Microsoft\\Boot\\bootmgfw.efi", "target": fallback.path},
                 )
             )
         else:
@@ -160,6 +162,7 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
                 [f"bcdedit /delete {entry.bcd_id}"],
                 [f"Menjalankan: {entry.path or '(tanpa file)'}", "GUID & path dicek ulang sesaat sebelum dihapus"],
                 comp.ref,
+                {"bcd_id": entry.bcd_id, "description": entry.description, "path": entry.path, "label": entry.label},
             )
         )
 
@@ -174,6 +177,7 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
                 [f"hapus {what} <ESP>\\{comp.ref}"],
                 [human_size(comp.size)] + comp.evidence[:2],
                 comp.ref,
+                {"path": comp.ref, "kind": what},
             )
         )
 
