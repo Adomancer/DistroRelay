@@ -119,6 +119,24 @@ mencentang partisinya. Partisi itu berperan `/boot`, jadi cukup ketik ID partisi
 Di laptop asli, ruang bekas `disk0-p5` **tidak** bersebelahan dengan C: (ada `disk0-p4` Windows Recovery di antaranya),
 jadi opsi Perluas C: tidak muncul dan ruangnya dibiarkan unallocated untuk distro berikutnya.
 
+## Gate M4–M5: Linux kit + backup
+
+**Tanpa VM (WSL, mis. Kali).** Hanya `setup --dry-run`, jadi tidak ada paket yang dipasang:
+
+| # | Langkah | Yang dicek | Lolos |
+|---|---|---|---|
+| K-1 | Windows: `distrorelay profile init` → `profile show` → `kit export --ntfs` | Kit di `C:\DistroRelay\kit`, `kit verify C:\DistroRelay\kit` ok | [ ] |
+| K-2 | WSL: `cd /mnt/c/DistroRelay/kit && sh bootstrap.sh info` | Distro terdeteksi (Kali → keluarga debian), "semua hash cocok" | [ ] |
+| K-3 | WSL: `sh bootstrap.sh backup` → checklist → ketik beberapa nomor | Paket sistem (linux-image, grub, systemd, …) tidak muncul di checklist; backup di `C:\DistroRelay\linux-backups\<id>`. Karena kit di NTFS (bukan USB), file sensitif ditolak dengan catatan | [ ] |
+| K-4 | WSL: `sh bootstrap.sh backups` lalu `sh bootstrap.sh setup --dry-run` | Backup `[ok]`; rencana memuat "Pulihkan dotfiles dari …" | [ ] |
+| K-5 | Windows: `distrorelay profile import C:\DistroRelay\linux-backups\<id>` → `ya` | Perubahan tampil, `profile.toml.bak-*` dibuat, `profile show` memuat paket baru + `exclude` | [ ] |
+| K-6 | Ubah 1 byte `dotfiles.tar.gz` di backup itu, ulangi K-4 dan K-5 | `backups` menandai RUSAK, `setup` tidak memakainya, `profile import` menolak | [ ] |
+
+**Di Linux sungguhan (VM atau live USB, belakangan):** `setup` sungguhan di Fedora, Arch (dengan paket AUR), dan
+Ubuntu; `backup` dengan kit di USB dan `~/.ssh` di `dotfiles.sensitive` → file `.gpg` ada di USB, lalu `setup` di distro
+lain mengembalikan `~/.ssh` dengan permission 700/600; partisi root Linux yang punya backup tersebut di drive eksternal
+tidak meminta "DATA SUDAH DIBACKUP" di wizard uninstall.
+
 ## Khusus M2a (sudah bisa dicoba sekarang)
 
 - [ ] `distrorelay backup --usb <huruf>` di VM: semua verifikasi `[ok]`, folder `esp\` di USB lengkap

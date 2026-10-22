@@ -4,7 +4,7 @@ Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → unin
 
 Masalah awalnya: setelah partisi Linux di-wipe, GRUB masih muncul saat boot karena folder bootloader di EFI System Partition (ESP), entri boot di NVRAM, dan partisi pendukung seperti `/boot` tidak ikut terhapus.
 
-## Status: M0 + M1 + M2 + M3 (CLI + wizard TUI)
+## Status: M0 + M1 + M2 + M3 (CLI + wizard TUI), M4 + M5 (Linux kit + backup)
 
 Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` (juga wizard uninstall di TUI) menghapus entri boot, folder ESP, dan partisi Linux yang dipilih.**
 Jalankan **di VM dulu** (lihat [tests/vm/SCENARIOS.md](tests/vm/SCENARIOS.md)). Di laptop asli, `uninstall` menolak jalan
@@ -19,7 +19,9 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M2b | Eksekusi uninstall EFI (journal, post-check, `restore`), CLI | ✅ (lolos skenario VM) |
 | M2c | Alur tunggal `UninstallFlow`/`RestoreFlow`; wizard uninstall, menu Pulihkan, dan journal di TUI | ✅ fase A + B lolos VM (sisa: cek 2× reboot skenario 9) |
 | M3 | Hapus partisi Linux (pengaman + ketik ID partisi, aturan backup bertingkat), pulihkan partisi, perluas C: kalau bersebelahan | ✅ kode + test simulasi; skenario VM belum |
-| M4–M7 | Profil + setup Linux, backup Linux, ISO manager, rilis `.exe` | belum |
+| M4 | Profil (TOML) + peta nama paket per distro, export Linux kit ke USB/NTFS, `setup` di distro baru | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
+| M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import`, aturan backup bertingkat (a) | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
+| M6–M7 | ISO manager, rilis `.exe` | belum |
 
 ## Apa yang dilakukan scan
 
@@ -105,9 +107,68 @@ Log ada di `%LOCALAPPDATA%\DistroRelay\logs\`.
 
 Test tidak menyentuh sistem: perintah memakai `FakeRunner`, ESP memakai folder sementara, dan NVRAM/superblock dibuat sintetis. Inventaris disk di `tests/fixtures/disks_laptop.json` diambil dari laptop asli dengan nomor seri disamarkan.
 
+## Linux kit (M4–M5): pasang ulang aplikasi di distro baru
+
+Profil distro-hopping (aplikasi, repo, dotfiles) diedit di Windows sebagai TOML, lalu diekspor bersama kode kit ke
+flashdisk dan/atau partisi Windows. Di distro baru, kit memasang semuanya lewat package manager distro itu.
+
+```powershell
+# Di Windows (tidak butuh admin)
+.venv\Scripts\python.exe -m distrorelay profile init     # %LOCALAPPDATA%\DistroRelay\profile.toml, lalu edit
+.venv\Scripts\python.exe -m distrorelay profile show     # cek + pratinjau nama paket di Fedora/Arch/Ubuntu
+.venv\Scripts\python.exe -m distrorelay kit export --drive E --ntfs   # E:\DistroRelay\kit dan C:\DistroRelay\kit
+.venv\Scripts\python.exe -m distrorelay fast-startup     # harus MATI kalau Linux perlu menulis ke partisi Windows
+```
+
+```sh
+# Di Linux, dari folder kit (mis. /run/media/$USER/USB/DistroRelay/kit atau /mnt/c/DistroRelay/kit di WSL)
+sh bootstrap.sh info             # distro + isi kit; hash semua file dicek dulu
+sh bootstrap.sh setup --dry-run  # rencana + perintah persisnya, tidak menjalankan apa pun
+sh bootstrap.sh setup            # repo -> paket -> Flathub/Flatpak -> AUR (paru, dengan persetujuan) -> laporan
+```
+
+- Distro yang didukung: keluarga Fedora (dnf), Arch (pacman + paru untuk AUR), Debian/Ubuntu/Mint (apt), dikenali dari
+  `/etc/os-release` (`ID` + `ID_LIKE`, jadi EndeavourOS, Nobara, Mint, Kali ikut).
+- Nama paket di profil adalah nama logis; terjemahannya per distro ada di
+  [`src/distrorelay/common/data/packages.toml`](src/distrorelay/common/data/packages.toml) dan bisa ditimpa lewat
+  `%LOCALAPPDATA%\DistroRelay\packages.toml`.
+- Kit tidak butuh `pip install`: Python stdlib saja, jalan di Python 3.8+ (`bootstrap.sh` memasang python3 kalau belum ada).
+- `setup` hanya menambah. Kalau pemasangan paket sekaligus gagal, paketnya dicoba satu per satu supaya ketahuan mana
+  yang bermasalah. Dotfiles dipulihkan dari backup terbaru (lihat di bawah); file lama di-rename, bukan ditimpa.
+
+### Backup dari distro lama (M5)
+
+Sebelum pindah distro, jalankan `backup` di distro lama dari folder kit. Hasilnya bisa dipakai `setup` di distro baru,
+dan dimasukkan ke profil di Windows.
+
+```sh
+sh bootstrap.sh backup           # daftar paket (dikurasi) + dotfiles (+ file sensitif terenkripsi gpg)
+sh bootstrap.sh backup --yes     # tanpa checklist kurasi
+sh bootstrap.sh backups          # daftar backup di kit ini + verifikasi hash
+sh bootstrap.sh setup --backup latest|none|DIR   # default: backup terbaru yang lolos verifikasi
+```
+
+```powershell
+# Di Windows: tambahkan paket hasil backup ke profil (hanya menambah; profil lama disimpan sebagai profile.toml.bak-*)
+.venv\Scripts\python.exe -m distrorelay profile import E:\DistroRelay\linux-backups\20261022-150000-fedora
+```
+
+- **Ini bukan backup dokumen/foto/kode.** Isinya hanya daftar paket dan dotfiles. Data pribadi tetap perlu rsync,
+  restic, atau Déjà Dup.
+- Paket bawaan distro (kernel, firmware, bootloader, dsb.) disaring otomatis lewat pola di
+  [`base_packages/`](src/distrorelay/common/data/base_packages). Sisanya bisa dikurasi di checklist; yang tidak dibawa
+  dicatat di `apps.exclude`, jadi tidak ditanya lagi lain kali.
+- `dotfiles.sensitive` (mis. `~/.ssh`) **selalu** dienkripsi gpg (AES256, passphrase) dan hanya disimpan di USB. Kalau
+  kit ini di partisi Windows, file sensitif ditaruh di kit lain yang ada di USB, atau tidak dibackup sama sekali.
+  Isinya tidak pernah ditulis ke disk tanpa enkripsi, dan dipulihkan dengan permission 700/600.
+- Backup mencatat UUID filesystem `/` dan `/home` (+ LUKS). Saat uninstall di Windows, partisi yang UUID-nya tercatat
+  di backup Linux terverifikasi di drive eksternal tidak perlu pernyataan "DATA SUDAH DIBACKUP" (tetap ada peringatan).
+
 ## Struktur
 
 ```
+src/distrorelay_linux/    Linux kit (stdlib, Python 3.8+): cli, distro, pm, provision, dotfiles, backup, kit, bootstrap.sh
+src/distrorelay/common/   profil + peta paket, dipakai Windows dan Linux kit
 src/distrorelay/
 ├─ __main__.py            CLI & elevasi admin
 ├─ render.py              tampilan bersama untuk CLI dan TUI
@@ -132,5 +193,6 @@ src/distrorelay/
    ├─ postcheck.py        post-check sesudah eksekusi
    ├─ restore.py          pemulihan folder ESP & entri boot
    ├─ stopping.py         berhenti rapi (Ctrl+C, jendela ditutup)
-   └─ workflow.py         UninstallFlow & RestoreFlow: satu-satunya jalan ke perubahan sistem
+   ├─ workflow.py         UninstallFlow & RestoreFlow: satu-satunya jalan ke perubahan sistem
+   └─ kit_export.py       export Linux kit + profil, cek Fast Startup
 ```

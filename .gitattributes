@@ -1,0 +1,2 @@
+# Script Linux harus tetap LF walau di-checkout di Windows.
+*.sh text eol=lf

@@ -1,0 +1,164 @@
+# Peta nama paket logis -> nama paket per distro.
+#
+# Kunci per entri:
+#   all                  nama yang sama di semua distro
+#   fedora, arch, debian keluarga distro (turunannya ikut: Nobara, EndeavourOS, Mint, ...)
+#   ubuntu, linuxmint, … ID distro yang lebih spesifik; menang atas keluarganya
+# Daftar kosong = tidak tersedia di distro itu (dilewati, dengan catatan).
+# Nama yang tidak tercantum dipakai apa adanya di semua distro, tapi saat backup (M5) paket yang tidak tercantum
+# dianggap khusus distro asalnya. Tambahkan entri di %LOCALAPPDATA%\DistroRelay\packages.toml untuk menimpa.
+
+# --- Sama di semua distro -------------------------------------------------------
+[git]
+all = ["git"]
+[curl]
+all = ["curl"]
+[wget]
+all = ["wget"]
+[rsync]
+all = ["rsync"]
+[htop]
+all = ["htop"]
+[btop]
+all = ["btop"]
+[tmux]
+all = ["tmux"]
+[zsh]
+all = ["zsh"]
+[fish]
+all = ["fish"]
+[nano]
+all = ["nano"]
+[neovim]
+all = ["neovim"]
+[unzip]
+all = ["unzip"]
+[tree]
+all = ["tree"]
+[jq]
+all = ["jq"]
+[ripgrep]
+all = ["ripgrep"]
+[bat]
+all = ["bat"]
+[fastfetch]
+all = ["fastfetch"]
+[flatpak]
+all = ["flatpak"]
+[podman]
+all = ["podman"]
+[kitty]
+all = ["kitty"]
+[alacritty]
+all = ["alacritty"]
+[vlc]
+all = ["vlc"]
+[mpv]
+all = ["mpv"]
+[gimp]
+all = ["gimp"]
+[inkscape]
+all = ["inkscape"]
+[kdenlive]
+all = ["kdenlive"]
+[obs-studio]
+all = ["obs-studio"]
+[thunderbird]
+all = ["thunderbird"]
+[gnome-tweaks]
+all = ["gnome-tweaks"]
+
+# --- Beda nama per distro ----------------------------------------------------------
+[build-tools]
+fedora = ["gcc", "gcc-c++", "make", "autoconf", "automake", "pkgconf"]
+arch = ["base-devel"]
+debian = ["build-essential"]
+
+[firefox]
+fedora = ["firefox"]
+arch = ["firefox"]
+debian = ["firefox-esr"]
+ubuntu = ["firefox"]  # di Ubuntu paket ini memasang versi snap
+linuxmint = ["firefox"]
+
+[chromium]
+fedora = ["chromium"]
+arch = ["chromium"]
+debian = ["chromium"]
+ubuntu = ["chromium-browser"]  # di Ubuntu paket ini memasang versi snap
+
+[vim]
+fedora = ["vim-enhanced"]
+arch = ["vim"]
+debian = ["vim"]
+
+[openssh]
+fedora = ["openssh-clients", "openssh-server"]
+arch = ["openssh"]
+debian = ["openssh-client", "openssh-server"]
+
+[fd]
+fedora = ["fd-find"]
+arch = ["fd"]
+debian = ["fd-find"]
+
+[python]
+fedora = ["python3"]
+arch = ["python"]
+debian = ["python3"]
+
+[pip]
+fedora = ["python3-pip"]
+arch = ["python-pip"]
+debian = ["python3-pip"]
+
+[nodejs]
+fedora = ["nodejs", "nodejs-npm"]
+arch = ["nodejs", "npm"]
+debian = ["nodejs", "npm"]
+
+[java]
+fedora = ["java-21-openjdk-devel"]
+arch = ["jdk21-openjdk"]
+debian = ["default-jdk"]
+
+[go]
+fedora = ["golang"]
+arch = ["go"]
+debian = ["golang-go"]
+
+[rust]
+fedora = ["rust", "cargo"]
+arch = ["rust"]
+debian = ["rustc", "cargo"]
+
+[docker]
+fedora = ["moby-engine", "docker-compose"]
+arch = ["docker", "docker-compose"]
+debian = ["docker.io", "docker-compose"]
+
+[7zip]
+fedora = ["p7zip", "p7zip-plugins"]
+arch = ["7zip"]
+debian = ["p7zip-full"]
+
+[ffmpeg]
+fedora = ["ffmpeg-free"]  # versi penuh ("ffmpeg") ada di RPM Fusion
+arch = ["ffmpeg"]
+debian = ["ffmpeg"]
+
+[libreoffice]
+fedora = ["libreoffice"]
+arch = ["libreoffice-fresh"]
+debian = ["libreoffice"]
+
+[steam]
+fedora = ["steam"]  # butuh repo rpmfusion (nonfree)
+arch = ["steam"]  # butuh repo multilib
+debian = ["steam-installer"]
+
+# Tidak ada di repo resmi: pakai Flatpak (com.visualstudio.code) atau AUR (visual-studio-code-bin).
+[vscode]
+fedora = []
+arch = []
+debian = []

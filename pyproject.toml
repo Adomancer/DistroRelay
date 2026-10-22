@@ -19,5 +19,9 @@ distrorelay = "distrorelay.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+distrorelay = ["common/data/*.toml", "common/data/base_packages/*.txt"]
+distrorelay_linux = ["bootstrap.sh"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

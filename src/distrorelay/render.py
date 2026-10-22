@@ -370,3 +370,46 @@ def info_text(report: ScanReport, log_path: str | None = None) -> Text:
     if log_path:
         text.append(f"\nLog: {log_path}\n", style="dim")
     return text
+
+
+# Contoh distro per keluarga untuk pratinjau profil (ID distro menentukan override seperti firefox di Ubuntu).
+_PREVIEW = (("Fedora", "fedora", "fedora"), ("Arch", "arch", "arch"), ("Ubuntu", "ubuntu", "debian"))
+
+
+def profile_text(profile, package_map, path) -> Text:
+    text = Text(f"Profil '{profile.name}'", style="bold")
+    text.append(f"  ({path})\n", style="dim")
+    rows = (
+        ("Paket (nama logis)", profile.native), ("Flatpak", profile.flatpak), ("AUR (hanya Arch)", profile.aur),
+        ("Repo", profile.repos), ("Dotfiles", profile.dotfiles), ("Dotfiles sensitif (dienkripsi)", profile.sensitive),
+    )
+    for label, values in rows:
+        text.append(f"  {label}: ", style="bold")
+        text.append(f"{', '.join(values) or '-'}\n")
+    text.append("\nPratinjau nama paket per distro\n", style="bold")
+    for title, distro_id, family in _PREVIEW:
+        resolution = package_map.resolve(profile.native, distro_id, family)
+        extra = profile.distro_specific.get(family, [])
+        text.append(f"  {title}: ", style="bold")
+        text.append(" ".join(resolution.packages + extra) or "-")
+        if resolution.skipped:
+            text.append(f"  (tidak tersedia: {', '.join(resolution.skipped)})", style="yellow")
+        text.append("\n")
+    return text
+
+
+def kit_export_text(result) -> Text:
+    text = Text(f"Kit ditulis ke {result.kit_dir}\n", style="bold")
+    text.append(f"  {len(result.files)} file, dibuat {result.created_at}\n", style="dim")
+    if result.previous is not None:
+        text.append(f"  Kit sebelumnya disimpan di {result.previous}\n", style="dim")
+    if result.ok:
+        text.append("  Semua hash cocok setelah ditulis.\n", style="green")
+        text.append(
+            f"  Di Linux: buka folder kit lalu jalankan `sh bootstrap.sh info`, `sh bootstrap.sh setup --dry-run`, "
+            "lalu `sh bootstrap.sh setup`.\n",
+            style="dim",
+        )
+    for problem in result.problems:
+        text.append(f"  [GAGAL] {problem}\n", style="bold red")
+    return text

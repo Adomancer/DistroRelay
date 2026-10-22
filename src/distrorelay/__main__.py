@@ -71,11 +71,33 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--partition", action="append", default=[], metavar="ID",
                          help="partisi Linux dari backup (mis. disk0-p5 atau GUID partisinya)")
     commands.add_parser("journal", help="tampilkan sesi eksekusi, termasuk yang terputus di tengah")
+
+    profile = commands.add_parser("profile", help="profil distro-hopping (aplikasi, repo, dotfiles) untuk Linux kit")
+    profile_commands = profile.add_subparsers(dest="profile_command", required=True)
+    init = profile_commands.add_parser("init", help="buat profile.toml awal untuk diedit")
+    init.add_argument("--force", action="store_true", help="timpa profile.toml yang sudah ada")
+    profile_commands.add_parser("show", help="cek profil dan tampilkan ringkasannya")
+    profile_import = profile_commands.add_parser("import", help="gabungkan hasil `backup` dari Linux ke profil")
+    profile_import.add_argument("directory", metavar="FOLDER", help="mis. E:\\DistroRelay\\linux-backups\\<id>")
+    profile_import.add_argument("--yes", action="store_true", help="tanpa konfirmasi")
+
+    kit = commands.add_parser("kit", help="Linux kit: export ke USB / partisi NTFS, verifikasi")
+    kit_commands = kit.add_subparsers(dest="kit_command", required=True)
+    export = kit_commands.add_parser("export", help="tulis kit + profil ke <drive>:\\DistroRelay\\kit")
+    export.add_argument("--drive", metavar="HURUF", help="drive tujuan, mis. E (flashdisk)")
+    export.add_argument("--ntfs", action="store_true", help="juga ke C:\\DistroRelay\\kit (partisi Windows)")
+    kit_verify = kit_commands.add_parser("verify", help="cek ulang hash semua file kit")
+    kit_verify.add_argument("directory", metavar="FOLDER", help="mis. E:\\DistroRelay\\kit")
+
+    fast = commands.add_parser("fast-startup", help="lihat / ubah Fast Startup (harus mati supaya Linux bisa menulis ke NTFS)")
+    switch = fast.add_mutually_exclusive_group()
+    switch.add_argument("--off", action="store_true", help="matikan Fast Startup")
+    switch.add_argument("--on", action="store_true", help="nyalakan lagi Fast Startup")
     return parser
 
 
 # Perintah yang hanya membaca file DistroRelay sendiri tidak perlu hak Administrator.
-_NO_ADMIN_COMMANDS = {"verify-backup", "journal"}
+_NO_ADMIN_COMMANDS = {"verify-backup", "journal", "profile", "kit"}
 
 
 def _ask(prompt: str) -> str:
@@ -394,6 +416,140 @@ def _run_restore_command(args: argparse.Namespace, flow=None) -> int:
     return 0 if all(r.ok for r in results) else 1
 
 
+def _run_profile_command(args: argparse.Namespace) -> int:
+    from rich.console import Console
+
+    from . import render
+    from .common import profile as profile_mod
+    from .windows import kit_export
+
+    console = Console()
+    path = kit_export.profile_path()
+    if args.profile_command == "init":
+        if path.exists() and not args.force:
+            console.print(f"{path} sudah ada. Edit langsung, atau pakai --force untuk menimpanya.", markup=False)
+            return 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(profile_mod.to_toml(profile_mod.template()), encoding="utf-8")
+        console.print(f"Profil awal ditulis ke {path}. Edit, lalu cek dengan `distrorelay profile show`.", markup=False)
+        return 0
+    try:
+        profile = kit_export.load_profile(path)
+        package_map = kit_export.load_package_map()
+    except (profile_mod.ProfileError, ValueError) as exc:
+        console.print(f"Profil di {path} tidak valid:", style="bold red", markup=False)
+        for problem in getattr(exc, "problems", [str(exc)]):
+            console.print(f"  - {problem}", markup=False)
+        return 1
+    if args.profile_command == "import":
+        return _import_linux_backup(console, profile, path, Path(args.directory), args.yes)
+    console.print(render.profile_text(profile, package_map, path))
+    return 0
+
+
+def _import_linux_backup(console, profile, path: Path, folder: Path, yes: bool) -> int:
+    from datetime import datetime
+
+    from distrorelay_linux import backup as linux_backup
+
+    from .common import profile as profile_mod
+
+    problems = linux_backup.verify(folder)
+    if problems:
+        console.print(f"Backup {folder} tidak bisa dipakai: {'; '.join(problems)}", style="bold red", markup=False)
+        return 1
+    manifest = linux_backup.read_manifest(folder)
+    merged, changes = profile_mod.merge_update(profile, manifest.get("profile_update") or {})
+    distro = (manifest.get("distro") or {}).get("pretty_name", "?")
+    console.print(f"Backup {manifest.get('backup_id')} dari {distro}", markup=False)
+    if not changes:
+        console.print("Profil sudah memuat semua isi backup ini; tidak ada yang berubah.")
+        return 0
+    for change in changes:
+        console.print(f"  {change}", markup=False)
+    if not yes and _ask("Tambahkan ke profil? Ketik ya: ").lower() != "ya":
+        console.print("Dibatalkan, profil tidak berubah.")
+        return 1
+    backup_path = path.with_name(f"{path.name}.bak-{datetime.now():%Y%m%d-%H%M%S}")
+    backup_path.write_bytes(path.read_bytes())
+    path.write_text(profile_mod.to_toml(merged), encoding="utf-8")
+    console.print(f"Profil diperbarui ({path}); versi lama (termasuk komentarnya) di {backup_path}. "
+                  "Export ulang kit supaya ikut ke Linux.", markup=False)
+    return 0
+
+
+def _run_kit_command(args: argparse.Namespace) -> int:
+    from rich.console import Console
+
+    from . import render
+    from .common import profile as profile_mod
+    from .windows import kit_export
+
+    console = Console()
+    if args.kit_command == "verify":
+        from distrorelay_linux import kit as linux_kit
+
+        problems = linux_kit.verify(Path(args.directory))
+        for problem in problems:
+            console.print(f"[GAGAL] {problem}", style="bold red", markup=False)
+        if not problems:
+            console.print("Semua file kit cocok dengan manifest.", style="green")
+        return 1 if problems else 0
+
+    roots = []
+    if args.drive:
+        letter = args.drive.strip(":\\ ").upper()
+        if len(letter) != 1 or not letter.isalpha() or not Path(f"{letter}:\\").exists():
+            console.print(f"Drive {args.drive} tidak ada.", style="red", markup=False)
+            return 1
+        roots.append(Path(f"{letter}:\\"))
+    if args.ntfs and Path("C:\\") not in roots:
+        roots.append(Path("C:\\"))
+    if not roots:
+        console.print("Pilih tujuan: --drive HURUF (flashdisk) dan/atau --ntfs (C:\\DistroRelay\\kit).")
+        return 1
+    try:
+        profile = kit_export.load_profile()
+        package_map = kit_export.load_package_map()
+    except (profile_mod.ProfileError, ValueError) as exc:
+        console.print(f"Profil tidak valid: {exc}", style="bold red", markup=False)
+        return 1
+    code = 0
+    for root in roots:
+        try:
+            result = kit_export.export_kit(profile, package_map, root)
+        except (OSError, kit_export.KitExportError) as exc:
+            console.print(f"Export ke {root} gagal: {exc}", style="bold red", markup=False)
+            code = 1
+            continue
+        console.print(render.kit_export_text(result))
+        code = code or (0 if result.ok else 1)
+    if Path("C:\\") in roots and kit_export.fast_startup_enabled():
+        console.print(
+            "Fast Startup masih AKTIF: Linux hanya bisa me-mount partisi Windows read-only, jadi kit di C: bisa dipakai "
+            "untuk setup, tapi backup dari Linux tidak bisa disimpan di sana. Matikan dengan "
+            "`distrorelay fast-startup --off`.",
+            style="yellow",
+        )
+    return code
+
+
+def _run_fast_startup_command(args: argparse.Namespace) -> int:
+    from .windows import kit_export
+
+    if args.off or args.on:
+        try:
+            kit_export.set_fast_startup(bool(args.on))
+        except OSError as exc:
+            print(f"Gagal mengubah Fast Startup: {exc}")
+            return 1
+        print(f"Fast Startup sekarang {'AKTIF' if args.on else 'MATI'} (berlaku mulai shutdown berikutnya).")
+        return 0
+    state = kit_export.fast_startup_enabled()
+    print({True: "Fast Startup AKTIF.", False: "Fast Startup MATI.", None: "Status Fast Startup tidak terbaca."}[state])
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
@@ -433,6 +589,12 @@ def main(argv: list[str] | None = None) -> int:
             code = _run_restore_command(args)
         elif args.command == "journal":
             code = _run_journal_command(args)
+        elif args.command == "profile":
+            code = _run_profile_command(args)
+        elif args.command == "kit":
+            code = _run_kit_command(args)
+        elif args.command == "fast-startup":
+            code = _run_fast_startup_command(args)
         else:
             from .tui.app import run_tui
 
@@ -446,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.elevated_child:
             _pause()
         return code
-    if args.elevated_child and args.command in ("scan", "plan", "backup", "uninstall", "restore"):
+    if args.elevated_child and args.command in ("scan", "plan", "backup", "uninstall", "restore", "fast-startup"):
         _pause()
     return code
 

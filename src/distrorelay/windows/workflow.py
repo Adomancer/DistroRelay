@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from distrorelay_linux import backup as linux_backup
+
 from ..format import human_size
 from . import disks, flush, gpt_types
 from .backup import BackupResult, Verification, backup_runner, backups_root, create_backup, verify_backup_dir
@@ -221,11 +223,31 @@ class UninstallFlow:
         self._acknowledged = False
         self._ticket: GateTicket | None = None
         self._generation = 0
+        self._coverage: dict[str, str] | None = None
 
     def _changed(self) -> None:
         self._generation += 1
         self._ticket = None
         self.gate_result = None
+
+    def linux_backup_coverage(self) -> dict[str, str]:
+        """UUID filesystem/LUKS -> backup Linux DistroRelay (M5) yang lolos verifikasi di drive eksternal.
+
+        Aturan backup bertingkat (a): partisi data yang UUID-nya tercatat di backup seperti ini tidak butuh
+        pernyataan yang diketik. Dihitung sekali per scan.
+        """
+        if self._coverage is None:
+            self._coverage = {}
+            for root in self.deps.external_roots(self.report) if self.report else []:
+                for folder, manifest, problems in linux_backup.list_backups(Path(root) / "DistroRelay" / "linux-backups"):
+                    if manifest and not problems:
+                        for uuid in linux_backup.covered_uuids(manifest):
+                            self._coverage.setdefault(uuid, f"{manifest.get('backup_id', folder.name)} di {root}")
+        return self._coverage
+
+    def _covered_by(self, action) -> str | None:
+        uuid = str(action.data.get("fs_uuid") or "").lower()
+        return self.linux_backup_coverage().get(uuid) if uuid else None
 
     # --- 1. Sesi terputus ----------------------------------------------------
     def unfinished_sessions(self) -> list[SessionSummary]:
@@ -266,6 +288,7 @@ class UninstallFlow:
         self.report = self.deps.scan(progress=progress)
         self.plan, self.unknown, self.preflight = None, [], None
         self.confirmed, self.backup_id, self.backup_result = set(), None, None
+        self._coverage = None
         self._changed()
         return self.report
 
@@ -298,6 +321,14 @@ class UninstallFlow:
             self.report.analysis, self.report.boot_entries, refs,
             inventory=self.report.inventory, fsinfo=self.report.fsinfo, extend_c=extend_c,
         )
+        for action in self.plan.actions:
+            covered = self._covered_by(action) if action.data.get("needs_data_statement") else None
+            if covered:
+                self.plan.warnings.append(
+                    f"Partisi {action.data['id']} tercakup backup Linux {covered} (UUID filesystem cocok), jadi "
+                    f"pernyataan {DATA_WORD} tidak diminta. Ingat: backup itu hanya daftar paket + dotfiles, "
+                    "bukan dokumen/foto/kode"
+                )
         self._changed()
         return self.plan
 
@@ -311,7 +342,7 @@ class UninstallFlow:
             required.append(
                 TypedConfirmation(f"id:{pid}", f"ID partisi {pid}", f"Ketik ID partisi yang akan dihapus ({pid})", pid)
             )
-            if action.data.get("needs_data_statement"):
+            if action.data.get("needs_data_statement") and not self._covered_by(action):
                 required.append(
                     TypedConfirmation(
                         f"data:{pid}",
