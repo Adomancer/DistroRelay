@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from .backup import Verification
 from .execute import BOOTMGFW, FALLBACK, manifest_hashes
 from .scanner import ScanReport
@@ -29,30 +31,27 @@ def post_check(plan: UninstallPlan, manifest: dict, before: ScanReport, after: S
     intact = bootmgfw is not None and bootmgfw.sha256 == hashes.get(BOOTMGFW.lower())
     checks.append(Verification("bootmgfw.efi utuh", intact, "Ada, hash sama dengan backup" if intact else "Hilang/berubah"))
 
-    deleted_ids = {a.data["bcd_id"].lower() for a in plan.actions if a.kind == "delete-boot-entry"}
-    deleted_targets = {
-        ((a.data.get("description") or "").casefold(), (a.data.get("path") or "").lower())
-        for a in plan.actions
-        if a.kind == "delete-boot-entry"
-    }
-    remaining = [
-        e
-        for e in after.boot_entries
-        if (e.bcd_id or "").lower() in deleted_ids or (e.description.casefold(), (e.path or "").lower()) in deleted_targets
-    ]
-    checks.append(Verification("Entri yang dihapus sudah tidak ada", not remaining,
-                               "Ya" if not remaining else f"Masih ada: {', '.join(e.description for e in remaining)}"))
+    def entry_key(description: str | None, path: str | None) -> tuple[str, str]:
+        return ((description or "").casefold(), (path or "").lower())
 
-    kept_before = [
-        e
-        for e in before.boot_entries
-        if (e.bcd_id or "").lower() not in deleted_ids
-        and (e.description.casefold(), (e.path or "").lower()) not in deleted_targets
+    # Entri dobel (nama + path sama) dihitung per jumlah: menghapus satu dari dua entri kembar meninggalkan satu.
+    deleted = [a for a in plan.actions if a.kind == "delete-boot-entry"]
+    deleted_ids = {a.data["bcd_id"].lower() for a in deleted}
+    deleted_counts = Counter(entry_key(a.data.get("description"), a.data.get("path")) for a in deleted)
+    before_counts = Counter(entry_key(e.description, e.path) for e in before.boot_entries)
+    after_counts = Counter(entry_key(e.description, e.path) for e in after.boot_entries)
+    remaining = [e.description for e in after.boot_entries if (e.bcd_id or "").lower() in deleted_ids]
+    remaining += [key[0] for key, n in deleted_counts.items() if after_counts[key] > max(0, before_counts[key] - n)]
+    checks.append(Verification("Entri yang dihapus sudah tidak ada", not remaining,
+                               "Ya" if not remaining else f"Masih ada: {', '.join(sorted(set(remaining)))}"))
+
+    lost = [
+        key[0] or key[1]
+        for key, n in before_counts.items()
+        if after_counts[key] < n - deleted_counts.get(key, 0)
     ]
-    after_keys = {((e.description or "").casefold(), (e.path or "").lower()) for e in after.boot_entries}
-    lost = [e for e in kept_before if ((e.description or "").casefold(), (e.path or "").lower()) not in after_keys]
     checks.append(Verification("Entri lain tetap ada", not lost,
-                               "Ya" if not lost else f"Hilang: {', '.join(e.description for e in lost)}"))
+                               "Ya" if not lost else f"Hilang: {', '.join(lost)}"))
 
     deleted_paths = [a.data["path"].lower() for a in plan.actions if a.kind == "delete-esp-item"]
     leftovers = [p for p in deleted_paths if after.esp.find(p) or after.esp.has_dir(p)]

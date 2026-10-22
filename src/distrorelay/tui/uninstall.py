@@ -42,7 +42,7 @@ def first_screen(flow: UninstallFlow) -> StepScreen:
 
 
 class UnfinishedScreen(StepScreen):
-    STEP = "Sebelum mulai · Ada sesi uninstall yang belum tuntas"
+    STEP = "Sebelum mulai · Ada sesi yang belum tuntas"
     HELP = (
         "Sesi di bawah terputus, dihentikan, gagal, atau post-check-nya gagal, jadi sistem mungkin setengah jadi. "
         "Wizard akan scan ulang dulu, jadi kondisi sekarang yang dipakai. Untuk lanjut, ketik "

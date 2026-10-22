@@ -385,12 +385,14 @@ def root_partition_with_linux_backup(tmp_path, **kwargs):
     return uninstall_everything(tmp_path, setup=setup)
 
 
-def test_verified_linux_backup_replaces_the_data_statement(tmp_path):
+def test_verified_linux_backup_does_not_replace_the_data_statement(tmp_path):
+    """Keputusan 2026-10-22 (review): backup Linux = paket + dotfiles, bukan data, dan root sering memuat /home.
+    Keberadaannya hanya ditampilkan; pernyataan DATA SUDAH DIBACKUP tetap wajib."""
     flow, bcd = root_partition_with_linux_backup(tmp_path)
-    assert [t.key for t in flow.required_typing()] == ["id:disk0-p5"]
-    assert any("tercakup backup Linux 20261022-150000-fedora" in w and "bukan dokumen" in w
-               for w in flow.plan.warnings)
-    assert flow.authorize("HAPUS", TYPED_P5) is not None
+    assert [t.key for t in flow.required_typing()] == ["id:disk0-p5", "data:disk0-p5"]
+    assert any("sudah dibackup (20261022-150000-fedora" in w and "tetap diminta" in w for w in flow.plan.warnings)
+    assert flow.authorize("HAPUS", TYPED_P5) is None
+    assert flow.authorize("HAPUS", {**TYPED_P5, "data:disk0-p5": "DATA SUDAH DIBACKUP"}) is not None
 
 
 def test_broken_linux_backup_does_not_count(tmp_path):

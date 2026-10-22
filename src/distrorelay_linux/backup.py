@@ -209,7 +209,7 @@ def _gpg_env() -> dict:
 
 def encrypt(runner, data: bytes) -> bytes:
     result = runner.run_bytes(
-        command("gpg", "--symmetric", "--cipher-algo", "AES256", "--output", "-", env=_gpg_env()), data
+        command("gpg", "--symmetric", "--cipher-algo", "AES256", "--no-armor", "--output", "-", env=_gpg_env()), data
     )
     if not result.ok or not result.data[:1] in _SKESK_HEADERS:
         raise BackupError(f"gpg gagal mengenkripsi (kode {result.returncode})")
@@ -312,8 +312,10 @@ def _backup_sensitive(runner, kit, staging: Path, backup_id: str, home: Path, us
             return None
         target_dir, location = others[0] / backup_id, str(others[0] / backup_id)
     buffer = io.BytesIO()  # isi rahasia hanya di memori; yang ditulis ke disk hanya hasil enkripsi
-    report = dotfiles.write_archive(buffer, home, [home_relative(p) for p in kit.profile.sensitive])
+    report = dotfiles.write_archive(buffer, home, [home_relative(p) for p in kit.profile.sensitive],
+                                    follow_symlinks=True)
     notes += [f"File sensitif {rel} tidak dibackup: {why}" for rel, why in report.skipped]
+    notes += [f"File sensitif {rel} adalah symlink; isi {target} yang dienkripsi" for rel, target in report.followed]
     try:
         encrypted = encrypt(runner, buffer.getvalue())
     except BackupError as exc:  # mis. prompt passphrase dibatalkan: sisa backup tetap jalan
@@ -352,6 +354,10 @@ def verify(path: Path) -> list[str]:
             problems.append(f"{name}: hilang")
         elif sha256_bytes((path / name).read_bytes()) != entry.get("sha256"):
             problems.append(f"{name}: isinya berubah (hash tidak cocok)")
+    listed = {str(entry.get("path", "")) for entry in manifest.get("files", [])}
+    for name in (DOTFILES, SENSITIVE):
+        if (path / name).exists() and name not in listed:
+            problems.append(f"{name}: ada di folder tapi tidak tercatat di manifest")
     return problems
 
 

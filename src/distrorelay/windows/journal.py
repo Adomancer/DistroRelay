@@ -38,17 +38,22 @@ class Journal:
     @classmethod
     def start(cls, directory: Path, session: str, data: dict) -> "Journal":
         directory.mkdir(parents=True, exist_ok=True)
-        journal = cls(directory / f"{session}.jsonl")
-        if journal.path.exists():
-            raise FileExistsError(f"Journal {journal.path} sudah ada")
+        # Dua sesi dalam detik yang sama (mis. restore sesudah uninstall): beri akhiran, urutan nama tetap urutan waktu.
+        name, counter = session, 1
+        while (directory / f"{name}.jsonl").exists():
+            counter += 1
+            name = f"{session}_{counter}"  # "_" diurutkan sesudah ".", jadi tetap sesudah sesi aslinya
+        journal = cls(directory / f"{name}.jsonl")
         journal._write(JournalEntry(_now(), "session-start", data=data))
         return journal
 
     def record(self, step: int, kind: str, ref: str | None, status: str, message: str = "") -> None:
         self._write(JournalEntry(_now(), status, step, kind, ref, message))
 
-    def finish(self, ok: bool, message: str = "") -> None:
-        self._write(JournalEntry(_now(), "session-end", message=message, data={"ok": ok}))
+    def finish(self, ok: bool, message: str = "", *, changed: bool | None = None) -> None:
+        """`changed=False` = pasti tidak ada yang diubah (mis. ESP gagal di-mount, script membatalkan diri)."""
+        data = {"ok": ok} if changed is None else {"ok": ok, "changed": changed}
+        self._write(JournalEntry(_now(), "session-end", message=message, data=data))
 
     def post_check(self, ok: bool, failed: list[str]) -> None:
         """Hasil scan ulang sesudah eksekusi. Hanya sesi dengan post-check hijau yang menuntaskan sesi terputus."""
@@ -88,10 +93,14 @@ class SessionSummary:
     post_check_ok: bool | None = None  # None = post-check tidak tercatat
     resolved_by: str | None = None  # sesi sesudahnya yang selesai dengan post-check hijau
     end_message: str = ""
+    kind: str = "uninstall"  # "uninstall" | "restore" | "shrink-c"; journal lama tanpa kind = uninstall
+    changed: bool | None = None  # False = sesi selesai tanpa mengubah apa pun
 
     @property
     def left_partial_state(self) -> bool:
         """Terputus, dihentikan, gagal, atau post-check gagal: sistem mungkin setengah jadi."""
+        if self.finished and self.changed is False:
+            return False
         return not self.finished or not self.ok or self.post_check_ok is False
 
     @property
@@ -117,6 +126,8 @@ def summarize(path: Path) -> SessionSummary:
         backup=(start.data or {}).get("backup") if start else None,
         post_check_ok=(check.data or {}).get("ok") if check else None,
         end_message=end.message if end else "",
+        kind=str((start.data or {}).get("kind") or "uninstall") if start else "uninstall",
+        changed=(end.data or {}).get("changed") if end else None,
     )
 
 
@@ -128,7 +139,11 @@ def sessions(directory: Path | None = None) -> list[SessionSummary]:
     for n, session in enumerate(found):
         if not session.left_partial_state:
             continue
-        later = next((s for s in found[n + 1 :] if s.finished and s.ok and s.post_check_ok), None)
+        # Hanya sesi sejenis yang bisa menuntaskan: post-check shrink-c tidak berkata apa pun tentang uninstall yang
+        # terputus, dan sebaliknya.
+        later = next(
+            (s for s in found[n + 1 :] if s.kind == session.kind and s.finished and s.ok and s.post_check_ok), None
+        )
         session.resolved_by = later.path.stem if later else None
     return found
 

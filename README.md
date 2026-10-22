@@ -20,7 +20,7 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M2c | Alur tunggal `UninstallFlow`/`RestoreFlow`; wizard uninstall, menu Pulihkan, dan journal di TUI | ✅ fase A + B lolos VM (sisa: cek 2× reboot skenario 9) |
 | M3 | Hapus partisi Linux (pengaman + ketik ID partisi, aturan backup bertingkat), pulihkan partisi, perluas C: kalau bersebelahan | ✅ kode + test simulasi; skenario VM belum |
 | M4 | Profil (TOML) + peta nama paket per distro, export Linux kit ke USB/NTFS, `setup` di distro baru | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
-| M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import`, aturan backup bertingkat (a) | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
+| M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import` | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
 | M6 | ISO manager (cek versi terbaru, unduh yang bisa dilanjutkan, verifikasi GPG + SHA256, salin ke Ventoy), shrink C: | ✅ kode + test (tanda tangan asli distro dicek dengan gpgv); unduh ISO penuh, salin ke Ventoy, dan shrink di VM belum |
 | M7 | Rilis `.exe` (PyInstaller, tanpa Python), `selftest`, workflow GitHub untuk rilis draft | ✅ `.exe` dibuild + `selftest` lolos di laptop ini; workflow GitHub belum pernah dijalankan |
 
@@ -170,7 +170,8 @@ sh bootstrap.sh setup --backup latest|none|DIR   # default: backup terbaru yang 
   kit ini di partisi Windows, file sensitif ditaruh di kit lain yang ada di USB, atau tidak dibackup sama sekali.
   Isinya tidak pernah ditulis ke disk tanpa enkripsi, dan dipulihkan dengan permission 700/600.
 - Backup mencatat UUID filesystem `/` dan `/home` (+ LUKS). Saat uninstall di Windows, partisi yang UUID-nya tercatat
-  di backup Linux terverifikasi di drive eksternal tidak perlu pernyataan "DATA SUDAH DIBACKUP" (tetap ada peringatan).
+  di backup Linux terverifikasi diberi catatan "paket + dotfiles sudah dibackup", tapi pernyataan "DATA SUDAH DIBACKUP"
+  **tetap wajib**: backup ini bukan backup dokumen, dan partisi root sering ikut memuat `/home`.
 
 ## ISO manager (M6): siapkan USB Ventoy
 

@@ -21,7 +21,7 @@ if ! python_ok; then
     case " ${ID} ${ID_LIKE} " in
         *" arch "*) sudo pacman -Syu --needed --noconfirm python ;;
         *" fedora "*) sudo dnf install -y python3 ;;
-        *" debian "* | *" ubuntu "*) sudo apt-get update && sudo apt-get install -y python3 ;;
+        *" debian "* | *" ubuntu "*) sudo apt-get update && sudo apt-get install -y --no-remove python3 ;;
         *)
             echo "Distro '${ID}' tidak dikenali. Pasang python3 >= 3.8 sendiri, lalu jalankan lagi." >&2
             exit 1

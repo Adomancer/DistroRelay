@@ -5,18 +5,21 @@ from __future__ import annotations
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
 from .. import render
+from ..windows.stopping import StopSignal, console_stop_guard
 from ..windows.workflow import RESTORE_WORD, RestoreFlow
 from .common import StepScreen
 
 
 class RecoveryScreen(StepScreen):
     STEP = "Pulihkan dari backup"
+    BINDINGS = [Binding("ctrl+c", "request_stop", "Berhenti setelah langkah ini", priority=True)]
     HELP = (
         "Pilih backup (diverifikasi ulang), lalu centang partisi Linux, folder ESP, dan/atau entri boot yang mau "
         "dikembalikan. Partisi hanya bisa dibuat ulang selama ruangnya belum dipakai. "
@@ -126,12 +129,19 @@ class RecoveryScreen(StepScreen):
         if ticket is None:
             self.set_status(f"Ketik {RESTORE_WORD} persis (huruf besar). Tidak ada yang diubah.", "bold red")
             return
-        self.app.quit_blocker = "Pemulihan sedang berjalan; tunggu sampai selesai."
         self.changed = True
-        self.background(lambda: self.flow.run(ticket, progress=self.progress), self._done, "Memulihkan…")
+        stop = StopSignal()
+        # Ctrl+C / Ctrl+Q = berhenti setelah langkah yang sedang jalan; tutup jendela ditangani console_stop_guard.
+        self.app.stop_signal = stop
+
+        def restore():
+            with console_stop_guard(stop):
+                return self.flow.run(ticket, progress=self.progress, stop=stop)
+
+        self.background(restore, self._done, "Memulihkan… (Ctrl+C = berhenti setelah langkah yang sedang jalan)")
 
     def _done(self, results) -> None:
-        self.app.quit_blocker = None
+        self.app.stop_signal = None
         self.query_one("#result", Static).update(render.verifications_text("Pemulihan", results))
         self.query_one("#word", Input).value = ""
         if all(r.ok for r in results):
@@ -140,8 +150,17 @@ class RecoveryScreen(StepScreen):
             self.set_status("Ada yang gagal dipulihkan: lihat hasil di bawah.", "bold red")
 
     def _job_failed(self, exc: Exception) -> None:
-        self.app.quit_blocker = None
+        self.app.stop_signal = None
         super()._job_failed(exc)
+
+    def action_request_stop(self, key: str = "Ctrl+C") -> None:
+        stop = self.app.stop_signal
+        if stop is None:  # tidak ada pemulihan yang berjalan: Ctrl+C seperti di layar lain
+            self.app.action_help_quit()
+            return
+        if not stop.requested():
+            stop.request(f"Dihentikan pengguna ({key})")
+            self.set_status("Berhenti setelah langkah yang sedang jalan selesai…", "bold yellow")
 
     def action_back(self) -> None:
         if not self.busy:

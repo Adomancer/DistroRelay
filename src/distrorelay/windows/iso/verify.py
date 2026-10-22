@@ -32,6 +32,8 @@ _GPGV_CANDIDATES = (r"GnuPG\bin\gpgv.exe", r"Git\usr\bin\gpgv.exe")
 _BAD_STATUS = {"BADSIG", "ERRSIG", "EXPSIG", "EXPKEYSIG", "REVKEYSIG", "NO_PUBKEY", "FAILURE"}
 # Algoritma hash OpenPGP yang dianggap lemah: MD5, SHA1, RIPEMD160.
 _WEAK_HASHES = {"1", "2", "3"}
+# Algoritma kunci yang tidak diterima: Elgamal (16, 20) dan DSA (17, kunci rilis lama umumnya 1024 bit).
+_WEAK_KEY_ALGOS = {"16", "17", "20"}
 
 GpgvRun = Callable[[list[str], Path], CommandResult]
 
@@ -66,6 +68,7 @@ class SignatureCheck:
     signer_name: str | None = None
     signed_text: bytes | None = None  # isi yang ditandatangani (hanya untuk clearsigned)
     judged: bool = False  # gpgv sempat menilai tanda tangannya (bukan gagal karena alat/keyring)
+    bad_signature: bool = False  # BADSIG: isi file tidak cocok dengan tanda tangannya (file rusak/diubah)
 
 
 def parse_status(text: str) -> list[tuple[str, list[str]]]:
@@ -118,7 +121,8 @@ def _judge(keys: KeySpec, result: CommandResult) -> SignatureCheck:
         if "NO_PUBKEY" in bad or "ERRSIG" in bad:
             return SignatureCheck(False, "ditandatangani kunci yang tidak ada di keyring bawaan (bukan kunci resmi)",
                                   judged=True)
-        return SignatureCheck(False, f"tanda tangan TIDAK sah ({', '.join(sorted(set(bad)))})", judged=True)
+        return SignatureCheck(False, f"tanda tangan TIDAK sah ({', '.join(sorted(set(bad)))})", judged=True,
+                              bad_signature="BADSIG" in bad)
     if not result.ok or not valid:
         detail = result.output().splitlines()[-1:] or [f"kode {result.returncode}"]
         # Tanpa status sama sekali = gpgv tidak sempat membaca tanda tangan (file bukan OpenPGP, alat rusak).
@@ -131,6 +135,8 @@ def _judge(keys: KeySpec, result: CommandResult) -> SignatureCheck:
                                   judged=True)
         if len(fields) > 7 and fields[7] in _WEAK_HASHES:
             return SignatureCheck(False, f"tanda tangan memakai algoritma hash lemah (id {fields[7]})", judged=True)
+        if len(fields) > 6 and fields[6] in _WEAK_KEY_ALGOS:
+            return SignatureCheck(False, f"tanda tangan memakai algoritma kunci lemah (id {fields[6]})", judged=True)
         signers.append(primary)
     name = next((" ".join(fields[1:]) for keyword, fields in status if keyword == "GOODSIG"), None)
     return SignatureCheck(True, f"sah, oleh {name or signers[0]}", signers[0], name, judged=True)
@@ -195,7 +201,7 @@ class Verification:
     steps: list[Step]
     sha256: str | None = None  # SHA256 resmi (dari checksum bertanda tangan, atau feed untuk Arch)
     signer: str | None = None
-    iso_bad: bool = False  # isi ISO terbukti bukan rilis resmi (SHA256/ukuran salah, tanda tangan Arch ditolak)
+    iso_bad: bool = False  # isi ISO terbukti rusak/diubah (SHA256/ukuran salah, atau BADSIG atas ISO Arch)
 
     @property
     def ok(self) -> bool:
@@ -222,7 +228,9 @@ def signed_sha256(
     check = check_signature(keys, data, signature, gpgv=gpgv, run=run)
     steps = [Step("Tanda tangan GPG", check.ok, f"{data.name}: {check.message}")]
     if not check.ok:
-        return Verification(steps, iso_bad=release.scheme == DETACHED_ISO and check.judged)
+        # Kunci tidak dikenal/kedaluwarsa = masalah keyring, bukan bukti ISO-nya rusak: jangan disisihkan, karena
+        # unduh ulang tidak akan menolong. Hanya BADSIG (isi tidak cocok dengan tanda tangannya) yang membuktikannya.
+        return Verification(steps, iso_bad=release.scheme == DETACHED_ISO and check.bad_signature)
     if release.scheme == DETACHED_ISO:
         return Verification(steps, (release.sha256 or "").lower() or None, check.signer)
     text = check.signed_text if check.signed_text is not None else data.read_bytes()

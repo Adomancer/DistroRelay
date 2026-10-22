@@ -18,6 +18,7 @@ from typing import Callable
 
 from . import DETACHED_ISO, VERIFIED_FILE, KeySpec, Release, SavedRelease, release_folder, save_release
 from . import download as download_mod
+from ..uncached import sha256_uncached
 from .verify import GpgvRun, Step, Verification, run_gpgv, sha256_file, signed_sha256, verify_release
 
 FAT32_LIMIT = 4 * 1024**3 - 1
@@ -166,7 +167,11 @@ def copy_verified(
     dest = target_dir / source.name
     label = f"Salin ke {target_dir}"
     if dest.exists():
-        if dest.is_file() and dest.stat().st_size == size and sha256_file(dest, hash_progress) == expected_sha256:
+        try:
+            same = dest.is_file() and dest.stat().st_size == size and sha256_uncached(dest, hash_progress) == expected_sha256
+        except OSError as exc:
+            return [Step(label, False, f"{dest} sudah ada tapi tidak bisa dibaca ({exc.strerror or exc}); tidak ditimpa")]
+        if same:
             return [Step(label, True, f"{dest.name} sudah ada dan identik; tidak disalin ulang")]
         return [Step(label, False, f"{dest} sudah ada tapi isinya berbeda; tidak ditimpa (pindahkan/hapus sendiri)")]
     if (filesystem or "").upper() == "FAT32" and size > FAT32_LIMIT:
@@ -194,9 +199,22 @@ def copy_verified(
     if digest.hexdigest() != expected_sha256:
         partial.unlink(missing_ok=True)
         return [Step(label, False, "ISO sumber berubah atau rusak saat dibaca (SHA256 tidak cocok); tidak disalin")]
-    os.replace(partial, dest)
+    try:
+        if os.path.lexists(dest):  # muncul selama penyalinan (menit-menit): jangan ditimpa
+            raise FileExistsError(dest)
+        os.rename(partial, dest)  # di Windows os.rename juga gagal kalau tujuan sudah ada
+    except FileExistsError:
+        partial.unlink(missing_ok=True)
+        return [Step(label, False, f"{dest} muncul selama penyalinan; tidak ditimpa")]
     steps = [Step(label, True, f"{dest.name} ({size} byte)")]
-    readback = sha256_file(dest, hash_progress)
+    # Dibaca langsung dari perangkat, bukan dari cache Windows, supaya yang dibuktikan isi USB-nya.
+    try:
+        readback = sha256_uncached(dest, hash_progress)
+    except OSError as exc:
+        dest.unlink(missing_ok=True)
+        steps.append(Step("Baca ulang dari USB", False,
+                          f"tidak bisa dibaca langsung dari USB ({exc.strerror or exc}); salinan dihapus (cek USB-nya)"))
+        return steps
     if readback != expected_sha256:
         dest.unlink(missing_ok=True)
         steps.append(Step("Baca ulang dari USB", False, "SHA256 salinan berbeda; salinan dihapus (cek USB-nya)"))

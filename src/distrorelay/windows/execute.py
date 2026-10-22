@@ -22,13 +22,14 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from ..format import human_size
 from . import flush
-from .backup import sha256_file, verify_backup_dir
+from .backup import sha256_file, valid_backup_id, verify_backup_dir
 from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware, merge_entries
 from .disks import DiskInventory, parse_inventory
 from .esp import norm_path
@@ -39,7 +40,8 @@ from .runner import AllowListRunner, Runner, powershell_args
 from .scanner import ScanReport
 from .signature import Signature, check_signature
 from .stopping import StopSignal
-from .uninstall_plan import PlannedAction, UninstallPlan, partition_refusal
+from .uncached import sha256_uncached
+from .uninstall_plan import VENDOR_DIRS, PlannedAction, UninstallPlan, partition_refusal
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +174,8 @@ def safe_esp_path(root: Path, rel: str, *, fallback_target: bool = False) -> Pat
     low = norm.lower()
     if not norm or low in ("efi", "efi\\boot", "efi\\microsoft") or low.startswith("efi\\microsoft\\"):
         raise ExecutionError(f"{rel}: dilindungi, tidak boleh diubah")
+    if any(low == d or low.startswith(d + "\\") for d in VENDOR_DIRS):
+        raise ExecutionError(f"{rel}: folder alat pabrikan, dilindungi")
     if low.startswith("efi\\boot\\") and not (fallback_target and low == FALLBACK.lower()):
         raise ExecutionError(f"{rel}: file fallback firmware hanya boleh diganti lewat langkah pengembalian fallback")
     base = root.resolve()
@@ -547,7 +551,7 @@ def _execute_steps(
                 if done else f"{stop.reason} sebelum langkah pertama; tidak ada yang diubah"
             )
             result.stopped_by_user = True
-            journal.finish(False, result.stopped)
+            journal.finish(False, result.stopped, changed=False if not done else None)
             return result
         say(f"[{number}/{len(actions)}] {action.title}…")
         handler = _HANDLERS.get(action.kind)
@@ -561,6 +565,9 @@ def _execute_steps(
             except Exception as exc:  # gagal = berhenti, apa pun penyebabnya
                 log.exception("Langkah %s (%s) gagal", number, action.kind)
                 text = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ExecutionError) else str(exc)
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    text = (f"perintah tidak selesai dalam {exc.timeout:.0f} detik; STATUS TIDAK DIKETAHUI (mungkin "
+                            "sudah jalan sebagian). Scan ulang dan periksa sebelum melanjutkan")
                 journal.record(number, action.kind, action.ref, "failed", text)
                 result.steps.append(StepResult(number, action.kind, action.title, False, text))
                 result.stopped = f"Berhenti di langkah {number} ({action.title}): {text}"
@@ -620,6 +627,9 @@ def check_gate(
         if check.key not in confirmed:
             problems.append(f"Belum dikonfirmasi: {check.title}")
 
+    if not valid_backup_id(backup_id):
+        problems.append(f"ID backup '{backup_id}' tidak valid: pakai ID seperti 20261021-193000, bukan path folder")
+        return gate
     local = Path(local_root) / backup_id
     gate.local_dir = local
     if not (local / "manifest.json").exists():
@@ -635,14 +645,18 @@ def check_gate(
         problems.append("Backup ini dibuat dengan --local-only. Eksekusi butuh backup yang punya salinan di drive eksternal")
     else:
         candidates = [Path(root) / "DistroRelay" / "backups" / backup_id for root in external_roots]
+        candidates = [c for c in candidates if c.resolve() != local.resolve()]
         external = next((c for c in candidates if (c / "manifest.json").exists()), None)
         if external is None:
             problems.append("Salinan backup di drive eksternal tidak ditemukan; colok drive tempat backup ini disalin")
         else:
             gate.external_dir = external
-            failed = [v for v in verify_backup_dir(external) if not v.ok]
+            # Dibaca langsung dari perangkat (bukan cache), dan harus salinan dari backup yang sama persis.
+            failed = [v for v in verify_backup_dir(external, sha256_uncached) if not v.ok]
             if failed:
                 problems.append(f"Salinan eksternal tidak lolos verifikasi: {failed[0].name}: {failed[0].message}")
+            elif sha256_file(external / "manifest.json") != sha256_file(local / "manifest.json"):
+                problems.append("Salinan eksternal bukan salinan backup lokal ini (manifest berbeda)")
 
     if report.inventory is None or manifest.get("layout_fingerprint") != report.inventory.fingerprint():
         problems.append("Layout disk berubah sejak backup dibuat; buat backup baru")

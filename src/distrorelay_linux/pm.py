@@ -50,7 +50,10 @@ class Apt(Backend):
         return [as_root(["apt-get", "update"], is_root)]
 
     def install(self, packages, is_root):
-        return as_root(["apt-get", "install", "-y", *packages], is_root, env={"DEBIAN_FRONTEND": "noninteractive"})
+        # --no-remove: dengan -y, apt menyelesaikan konflik dengan MENGHAPUS paket lain tanpa bertanya
+        # (mis. pipewire-pulse menghapus pulseaudio). Setup hanya boleh menambah, jadi lebih baik gagal.
+        return as_root(["apt-get", "install", "-y", "--no-remove", *packages], is_root,
+                       env={"DEBIAN_FRONTEND": "noninteractive"})
 
 
 _BACKENDS = {b.family: b for b in (Dnf(), Pacman(), Apt())}

@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -33,10 +34,20 @@ from .nvram import snapshot_from_raw
 from .runner import AllowListRunner, Runner
 from .preflight import M2A_CMDLETS
 from .scanner import ScanReport
+from .uncached import sha256_uncached
 
 log = logging.getLogger(__name__)
 
 _SKIP_DIRS = {"system volume information"}
+# ID backup = waktu pembuatan (create_backup). Hanya bentuk ini yang diterima, bukan path: Path(root) / "C:\\..." akan
+# membuang root-nya, sehingga "salinan eksternal" bisa diam-diam menunjuk ke salinan lokal yang sama.
+BACKUP_ID = re.compile(r"^\d{8}-\d{6}$")
+# File ESP yang memang tidak bisa dibaca saat Windows jalan (hive BCD); dicadangkan lewat bcdedit /export.
+_LOCKED_ESP_FILE = re.compile(r"^efi\\microsoft\\boot\\bcd(\.log\d*)?$", re.IGNORECASE)
+
+
+def valid_backup_id(backup_id: str | None) -> bool:
+    return bool(backup_id) and BACKUP_ID.fullmatch(backup_id) is not None
 _CHUNK = 1024 * 1024
 
 
@@ -160,41 +171,50 @@ def verify_zip(zip_path: Path, expected: list[dict]) -> Verification:
     return Verification("Isi esp.zip", True, f"{len(expected)} file dibaca ulang dari zip, semua hash cocok")
 
 
-def verify_files(directory: Path, files: list[BackupFile], label: str) -> Verification:
+def verify_files(directory: Path, files: list[BackupFile], label: str, hasher: Callable = sha256_file) -> Verification:
     mismatched = []
     for f in files:
         path = directory / f.name
-        if not path.exists() or sha256_file(path) != f.sha256:
-            mismatched.append(f.name)
+        try:
+            if not path.exists() or hasher(path) != f.sha256:
+                mismatched.append(f.name)
+        except OSError as exc:  # mis. sektor rusak saat dibaca langsung dari perangkat
+            mismatched.append(f"{f.name} (tidak terbaca: {exc.strerror or exc})")
     if mismatched:
         return Verification(label, False, f"Tidak cocok/hilang: {', '.join(mismatched)}")
     return Verification(label, True, f"{len(files)} file dibaca ulang, semua hash cocok")
 
 
-def verify_tree(directory: Path, expected: list[dict], label: str) -> Verification:
+def verify_tree(directory: Path, expected: list[dict], label: str, hasher: Callable = sha256_file) -> Verification:
     mismatched = []
     for entry in expected:
         path = directory.joinpath(*entry["path"].split("\\"))
-        if not path.exists() or sha256_file(path) != entry["sha256"]:
-            mismatched.append(entry["path"])
+        try:
+            if not path.exists() or hasher(path) != entry["sha256"]:
+                mismatched.append(entry["path"])
+        except OSError as exc:
+            mismatched.append(f"{entry['path']} (tidak terbaca: {exc.strerror or exc})")
     if mismatched:
         return Verification(label, False, f"{len(mismatched)} file tidak cocok/hilang, mis. {mismatched[0]}")
     return Verification(label, True, f"{len(expected)} file dibaca ulang, semua hash cocok")
 
 
-def verify_backup_dir(directory: Path) -> list[Verification]:
-    """Verifikasi ulang folder backup (lokal atau USB) terhadap manifest.json-nya."""
+def verify_backup_dir(directory: Path, hasher: Callable = sha256_file) -> list[Verification]:
+    """Verifikasi ulang folder backup (lokal atau USB) terhadap manifest.json-nya.
+
+    Untuk salinan di drive eksternal, pakai `hasher=sha256_uncached` supaya yang dibaca isi perangkatnya, bukan cache.
+    """
     directory = Path(directory)
     try:
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [Verification("manifest.json", False, f"Tidak bisa dibaca: {exc}")]
     files = [BackupFile(**f) for f in manifest.get("files", [])]
-    checks = [verify_files(directory, files, "Hash file backup")]
+    checks = [verify_files(directory, files, "Hash file backup", hasher)]
     if (directory / "esp.zip").exists():
         checks.append(verify_zip(directory / "esp.zip", manifest.get("esp_files", [])))
     if (directory / "esp").is_dir():
-        checks.append(verify_tree(directory / "esp", manifest.get("esp_files", []), "Folder esp\\"))
+        checks.append(verify_tree(directory / "esp", manifest.get("esp_files", []), "Folder esp\\", hasher))
     return checks
 
 
@@ -268,10 +288,17 @@ def create_backup(
     scanned = {f.path.lower(): f.sha256 for f in report.esp.files}
     changed = [e["path"] for e in result.esp_files if scanned.get(e["path"].lower()) not in (None, e["sha256"])]
     added = [e["path"] for e in result.esp_files if e["path"].lower() not in scanned]
-    if changed or added:
-        checks.append(Verification("ESP sama dengan saat scan", False, f"Berubah sejak scan: {(changed + added)[:3]}; scan ulang"))
+    backed = {e["path"].lower() for e in result.esp_files} | {p.lower() for p in result.skipped}
+    removed = [p for p in scanned if p not in backed]
+    unreadable = [p for p in result.skipped if not _LOCKED_ESP_FILE.match(p)]
+    if changed or added or removed:
+        checks.append(Verification("ESP sama dengan saat scan", False,
+                                   f"Berubah sejak scan: {(changed + added + removed)[:3]}; scan ulang"))
     else:
         checks.append(Verification("ESP sama dengan saat scan", True, "Semua file sama dengan hasil scan"))
+    if unreadable:
+        checks.append(Verification("Semua file ESP tercadang", False,
+                                   f"Tidak bisa dibaca saat backup: {unreadable[:3]}; tutup program yang memakainya lalu ulangi"))
 
     # bcdedit /store me-load file sebagai registry hive dan memperbarui header-nya, jadi yang dibaca
     # adalah salinan sementara. File backup itu sendiri tidak boleh berubah setelah hash-nya dicatat.
@@ -317,9 +344,11 @@ def create_backup(
             )
         else:
             result.usb_dir = str(usb)
-            say("Memverifikasi salinan di drive eksternal…")
-            checks.append(verify_files(usb, result.files, "Hash salinan USB"))
-            checks.append(verify_tree(usb / "esp", result.esp_files, "Folder esp\\ di USB (untuk xcopy dari WinRE)"))
+            say("Memverifikasi salinan di drive eksternal (dibaca langsung dari perangkat)…")
+            checks.append(verify_files(usb, result.files + [BackupFile("manifest.json", 0, sha256_file(local / "manifest.json"))],
+                                       "Hash salinan USB", sha256_uncached))
+            checks.append(verify_tree(usb / "esp", result.esp_files, "Folder esp\\ di USB (untuk xcopy dari WinRE)",
+                                      sha256_uncached))
     elif not local_only:
         checks.append(Verification("Salinan USB", False, "Tidak ada USB tujuan; backup hanya ada di C:"))
 

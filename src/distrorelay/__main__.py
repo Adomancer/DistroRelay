@@ -293,7 +293,7 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
 
     from . import render
     from .windows.stopping import StopSignal, console_stop_guard
-    from .windows.workflow import CONTINUE_WORD, DELETE_WORD, UninstallFlow, default_deps, typed
+    from .windows.workflow import CONTINUE_WORD, DELETE_WORD, FlowError, UninstallFlow, default_deps, typed
 
     console = Console()
     flow = flow or UninstallFlow(default_deps())
@@ -382,7 +382,14 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
     stop = StopSignal()
     with console.status("Menjalankan… (Ctrl+C = berhenti setelah langkah yang sedang jalan)") as status, \
             console_stop_guard(stop, notify=lambda m: status.update(m)):
-        result = flow.execute(ticket, progress=lambda m: status.update(m), stop=stop)
+        try:
+            result = flow.execute(ticket, progress=lambda m: status.update(m), stop=stop)
+        except FlowError as exc:
+            result = None
+            failure = str(exc)
+    if result is None:
+        console.print(f"Tidak dijalankan: {failure}", style="bold red", markup=False)
+        return 1
     console.print(render.execution_text(result))
     if result.stopped_by_user:
         console.print(
@@ -437,8 +444,12 @@ def _run_restore_command(args: argparse.Namespace, flow=None) -> int:
     if ticket is None:
         console.print("Dibatalkan.")
         return 1
-    with console.status("Memulihkan…") as status:
-        results = flow.run(ticket, progress=lambda m: status.update(m))
+    from .windows.stopping import StopSignal, console_stop_guard
+
+    stop = StopSignal()
+    with console.status("Memulihkan… (Ctrl+C = berhenti setelah langkah yang sedang jalan)") as status, \
+            console_stop_guard(stop, notify=lambda m: status.update(m)):
+        results = flow.run(ticket, progress=lambda m: status.update(m), stop=stop)
     console.print(render.verifications_text("Pemulihan", results))
     return 0 if all(r.ok for r in results) else 1
 
@@ -786,8 +797,13 @@ def _run_shrink_command(args: argparse.Namespace, inner=None, journal_root: Path
     if not typed(_ask_word(f"Ketik {shrink.SHRINK_WORD} untuk menjalankan, atau Enter untuk batal: "), shrink.SHRINK_WORD):
         console.print("Dibatalkan. Tidak ada yang diubah.")
         return 1
-    with console.status("Mengecilkan C: …"):
-        result = shrink.execute(plan, inner, journal_root=journal_root)
+    from .windows.stopping import StopSignal, console_stop_guard
+
+    stop = StopSignal()
+    # Ctrl+C / tutup jendela tidak boleh memotong Resize-Partition di tengah: penangan ini menahannya sampai selesai.
+    with console.status("Mengecilkan C: … (jangan matikan laptop; Ctrl+C ditahan sampai selesai)") as status, \
+            console_stop_guard(stop, notify=lambda m: status.update("Ditunggu sampai Resize-Partition selesai…")):
+        result = shrink.execute(plan, inner, journal_root=journal_root, stop=stop)
     console.print(result.message, style="green" if result.ok else "bold red", markup=False)
     return 0 if result.ok else 1
 

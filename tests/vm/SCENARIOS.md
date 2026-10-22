@@ -141,7 +141,7 @@ jadi opsi Perluas C: tidak muncul dan ruangnya dibiarkan unallocated untuk distr
 | L-3 | Ubuntu 22.04 atau lebih baru: `setup` | apt + Flatpak jalan di Python 3.10 | [ ] |
 | L-4 | Distro lama, kit di USB, `~/.ssh` di `dotfiles.sensitive`: `sh bootstrap.sh backup` | `sensitive.tar.gz.gpg` ada di USB; tidak ada salinan tanpa enkripsi | [ ] |
 | L-5 | Distro lain: `sh bootstrap.sh setup --backup latest` | `~/.ssh` kembali dengan permission 700/600 (`.pub` 644) | [ ] |
-| L-6 | Windows: wizard uninstall untuk partisi root yang punya backup L-4 di drive eksternal | Tidak minta "DATA SUDAH DIBACKUP", peringatan tetap muncul | [ ] |
+| L-6 | Windows: wizard uninstall untuk partisi root yang punya backup L-4 di drive eksternal | Ada catatan "paket + dotfiles sudah dibackup", tapi "DATA SUDAH DIBACKUP" tetap diminta | [ ] |
 
 ## Gate M6: ISO manager + shrink C:
 

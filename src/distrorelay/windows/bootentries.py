@@ -206,7 +206,7 @@ def _same(a: str | None, b: str | None) -> bool:
     return (a or "").strip().casefold() == (b or "").strip().casefold()
 
 
-def _match_bcd(fw: FirmwareConfig, nv: NvramSnapshot, unmatched_bcd: list) -> dict[int, object]:
+def _match_bcd(fw: FirmwareConfig, nv: NvramSnapshot, unmatched_bcd: list) -> tuple[dict[int, object], set[str]]:
     """Pasangkan tiap Boot#### dengan objek bcdedit-nya, dari bukti terkuat ke terlemah.
 
     1. BCDOBJECT di optional data. Kalau satu objek diklaim beberapa Boot#### (firmware/Windows bisa
@@ -247,16 +247,27 @@ def _match_bcd(fw: FirmwareConfig, nv: NvramSnapshot, unmatched_bcd: list) -> di
         return [e for e in unmatched_bcd if aligned(number, e)]
 
     matches: dict[int, object] = {}
+    ambiguous: set[int] = set()
+    twins: set[str] = set()  # objek bcdedit yang punya kembaran tak terbedakan
     for rule in (by_object, by_name_and_path, by_name_without_path, by_position):
         for number in sorted(nv.options):
-            if number in matches:
+            if number in matches or number in ambiguous:
                 continue
             found = rule(number, nv.options[number])
-            match = next((e for e in found if aligned(number, e)), found[0] if found else None)
+            in_line = [e for e in found if aligned(number, e)]
+            if not in_line and len(found) > 1:
+                # Beberapa objek bcdedit sama persis (mis. dua "Fedora" di disk berbeda) dan tidak ada yang sejajar:
+                # jangan menebak, karena `bcdedit /delete` bisa menghapus entri disk lain.
+                ambiguous.add(number)
+                twins.update(e.identifier for e in found)
+                continue
+            match = in_line[0] if in_line else (found[0] if found else None)
             if match is not None:
                 matches[number] = match
                 unmatched_bcd.remove(match)
-    return matches
+    for number in ambiguous:
+        matches.setdefault(number, None)
+    return matches, twins
 
 
 def _conflicts(match, option) -> list[str]:
@@ -277,12 +288,14 @@ def merge_entries(fw: FirmwareConfig | None, nv: NvramSnapshot | None) -> tuple[
     unmatched_bcd = list(fw.entries) if fw else []
 
     if nv is not None:
-        matches = _match_bcd(fw, nv, unmatched_bcd) if fw is not None else {}
+        matches, twins = _match_bcd(fw, nv, unmatched_bcd) if fw is not None else ({}, set())
         for number in sorted(nv.options):
             option = nv.options[number]
             match = matches.get(number)
             sources = ["NVRAM", "bcdedit"] if match else ["NVRAM"]
             conflicts = _conflicts(match, option) if match else []
+            if number in matches and match is None:
+                conflicts.append("ada beberapa objek bcdedit dengan nama + path yang sama; pasangannya tidak bisa dipastikan")
             entries.append(
                 BootEntry(
                     key=f"nv:{number:04X}",
@@ -299,14 +312,19 @@ def merge_entries(fw: FirmwareConfig | None, nv: NvramSnapshot | None) -> tuple[
                     conflicts=conflicts,
                 )
             )
-            if fw is not None and match is None:
+            if fw is not None and match is None and number not in matches:
                 notes.append(f"Entri {option.label} '{option.description}' terlihat di NVRAM tapi tidak di bcdedit")
             for conflict in conflicts:
-                notes.append(f"Entri {option.label} ({match.identifier}): {conflict}")
+                notes.append(f"Entri {option.label} ({match.identifier if match else 'tanpa pasangan bcdedit'}): {conflict}")
 
+    twins = twins if nv is not None and fw is not None else set()
     for entry in unmatched_bcd:
         order = fw.display_order.index(entry.identifier) if entry.identifier in fw.display_order else None
-        if nv is not None:
+        if entry.identifier in twins:
+            notes.append(f"Entri '{entry.description}' ({entry.identifier}) punya kembaran di bcdedit; pasangannya di "
+                         "NVRAM tidak bisa dipastikan, jadi tidak bisa dihapus dari sini")
+            order = None
+        elif nv is not None:
             notes.append(f"Entri '{entry.description}' ({entry.identifier}) terlihat di bcdedit tapi tidak di NVRAM")
             order = None  # urutan resmi diambil dari BootOrder NVRAM
         entries.append(

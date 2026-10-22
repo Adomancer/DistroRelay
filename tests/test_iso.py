@@ -364,9 +364,16 @@ def test_text_outside_the_clearsigned_block_is_ignored(tmp_path):
 
 @needs_gpgv
 def test_arch_iso_signed_by_attacker_is_rejected(tmp_path):
+    """Ditandatangani kunci yang tidak di-pin: ditolak dan tidak bisa disalin. ISO-nya tidak disisihkan (bukan BADSIG),
+    karena unduh ulang tidak menolong kalau masalahnya kunci; yang menentukan tetap verified.json + cek saat salin."""
     tools = make_tools(tmp_path, {BASE + "fake-1.0-x86_64.iso.sig": fixture("fake-1.0-x86_64.iso.evil.sig")})
     result = manager.prepare(fake_release(DETACHED_ISO), TEST_KEYS, tools)
-    assert not result.ok and (result.folder / "fake-1.0-x86_64.iso.rejected").exists()
+    assert not result.ok and "tidak di-pin" in result.verification.steps[0].message
+    assert not (result.folder / iso_mod.VERIFIED_FILE).exists()
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    saved = iso_mod.saved_releases("fake", tools.root)[0]
+    assert not manager.copy_to_drive(saved, TEST_KEYS, tools, usb)[0].ok and not list(usb.iterdir())
 
 
 @needs_gpgv

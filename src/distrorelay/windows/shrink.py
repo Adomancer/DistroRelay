@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from pathlib import Path
 from ..format import human_size
 from .journal import Journal, journal_dir
 from .runner import AllowListRunner, Runner, powershell_args
+from .stopping import StopSignal
 
 GIB = 1024**3
 MIB = 1024**2
@@ -29,6 +31,8 @@ MIN_SHRINK = 1 * GIB
 # Windows butuh ruang kosong untuk update, file hibernate/pagefile, dan pemulihan.
 MIN_FREE_AFTER = 20 * GIB
 SHRINK_WORD = "KECILKAN"
+# Kode keluar script kalau cek ulang di awalnya membatalkan sebelum Resize-Partition (pasti tidak ada yang berubah).
+UNCHANGED_EXIT = 3
 
 QUERY_SCRIPT = r"""# distrorelay:shrink-query
 $ErrorActionPreference = 'Stop'
@@ -49,7 +53,15 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $p = Get-Partition -DriveLetter C
 if ([string]$p.Guid -ne '__GUID__' -or $p.DiskNumber -ne __DISK__ -or $p.PartitionNumber -ne __NUMBER__ -or $p.Offset -ne __OFFSET__ -or $p.Size -ne __SIZE__) {
-  throw 'Partisi C: berubah sejak dicek; dibatalkan tanpa mengubah apa pun'
+  [Console]::Error.WriteLine('Partisi C: berubah sejak dicek; dibatalkan tanpa mengubah apa pun')
+  exit __UNCHANGED_EXIT__
+}
+# Ruang kosong dan batas Windows bisa berubah selama menunggu konfirmasi: cek ulang tepat sebelum mengecilkan.
+$s = Get-PartitionSupportedSize -DiskNumber __DISK__ -PartitionNumber __NUMBER__
+$v = Get-Volume -DriveLetter C
+if (__NEW_SIZE__ -lt $s.SizeMin -or ($v.SizeRemaining - __SHRINK_BY__) -lt __MIN_FREE__) {
+  [Console]::Error.WriteLine('Ruang kosong C: atau batas Windows berubah sejak dicek; dibatalkan tanpa mengubah apa pun')
+  exit __UNCHANGED_EXIT__
 }
 Resize-Partition -DiskNumber __DISK__ -PartitionNumber __NUMBER__ -Size __NEW_SIZE__
 $after = Get-Partition -DiskNumber __DISK__ -PartitionNumber __NUMBER__
@@ -137,6 +149,9 @@ class ShrinkPlan:
             "__NUMBER__": str(d.partition_number),
             "__OFFSET__": str(d.offset),
             "__NEW_SIZE__": str(self.new_size),
+            "__SHRINK_BY__": str(self.shrink_by),
+            "__MIN_FREE__": str(MIN_FREE_AFTER),
+            "__UNCHANGED_EXIT__": str(UNCHANGED_EXIT),
             "__SIZE__": str(d.size),
         }
         script = SHRINK_TEMPLATE
@@ -182,10 +197,30 @@ class ShrinkResult:
     journal: Path | None = None
 
 
-def execute(plan: ShrinkPlan, inner: Runner, *, journal_root: Path | None = None) -> ShrinkResult:
-    """Jalankan rencana yang sudah dikonfirmasi, lalu baca ulang C:."""
+def execute(
+    plan: ShrinkPlan, inner: Runner, *, journal_root: Path | None = None, stop: StopSignal | None = None
+) -> ShrinkResult:
+    """Jalankan rencana yang sudah dikonfirmasi, lalu baca ulang C:.
+
+    Hanya satu langkah. Selama `Resize-Partition` berjalan, Ctrl+C / tutup jendela ditahan oleh `console_stop_guard`
+    pemanggil (langkahnya diselesaikan); `stop` ditandai selesai setelah journal ditutup.
+    """
     if not plan.ok:
         raise ShrinkError("Rencana tidak valid: " + "; ".join(plan.problems))
+    stop = stop or StopSignal()
+    try:
+        if stop.requested():
+            return ShrinkResult(False, f"{stop.reason} sebelum mulai; tidak ada yang diubah")
+        stop.step_started()
+        try:
+            return _execute(plan, inner, journal_root)
+        finally:
+            stop.step_finished()
+    finally:
+        stop.mark_done()
+
+
+def _execute(plan: ShrinkPlan, inner: Runner, journal_root: Path | None) -> ShrinkResult:
     runner = AllowListRunner(inner, scripts=frozenset({plan.script}))
     session = datetime.now().strftime("%Y%m%d-%H%M%S")
     d = plan.drive
@@ -195,10 +230,20 @@ def execute(plan: ShrinkPlan, inner: Runner, *, journal_root: Path | None = None
         {"kind": "shrink-c", "guid": d.guid, "size": d.size, "new_size": plan.new_size},
     )
     journal.record(1, "shrink-c", "C:", "started")
-    result = runner.run(powershell_args(plan.script), timeout=1800)
+    try:
+        result = runner.run(powershell_args(plan.script), timeout=1800)
+    except subprocess.TimeoutExpired:
+        message = ("Resize-Partition tidak selesai dalam 30 menit; STATUS TIDAK DIKETAHUI. Jangan matikan laptop; "
+                   "cek ukuran C: di Disk Management, lalu jalankan `shrink-c` (tanpa --size) untuk membaca ulang")
+        journal.record(1, "shrink-c", "C:", "failed", message)
+        journal.finish(False, message)
+        return ShrinkResult(False, message, journal=journal.path)
     if not result.ok:
         journal.record(1, "shrink-c", "C:", "failed", result.output()[:500])
-        journal.finish(False, "Resize-Partition gagal")
+        # Pengecekan di awal script membatalkan sebelum Resize-Partition: pasti tidak ada yang berubah.
+        unchanged = result.returncode == UNCHANGED_EXIT
+        journal.finish(False, "Dibatalkan tanpa mengubah apa pun" if unchanged else "Resize-Partition gagal",
+                       changed=False if unchanged else None)
         return ShrinkResult(False, f"Resize-Partition gagal: {result.output()}", journal=journal.path)
     journal.record(1, "shrink-c", "C:", "done")
 

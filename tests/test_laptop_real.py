@@ -20,6 +20,7 @@ from distrorelay.windows.bootrefs import (
 from distrorelay.windows import gpt_types
 from distrorelay.windows.fsprobe import FsInfo
 from helpers import (
+    gpt_slots_like_windows,
     LAPTOP_BOOT_UUID,
     add_partition,
     fake_esp,
@@ -45,7 +46,8 @@ def analyze_laptop(tmp_path, files=None, inventory=None):
     inventory = inventory or laptop_inventory()
     esp = fake_esp(tmp_path, inventory, files or laptop_real_esp_files())
     entries, notes = real_entries()
-    return analyze(inventory, FSINFO, True, entries, esp, collect_esp_refs(tmp_path, esp), notes), esp
+    slots = gpt_slots_like_windows(inventory)
+    return analyze(inventory, FSINFO, True, entries, esp, collect_esp_refs(tmp_path, esp), notes, gpt_slots=slots), esp
 
 
 def by_key(analysis, key):
@@ -98,14 +100,14 @@ def test_laptop_fedora_arch_and_orphan_grub_are_leftovers(tmp_path):
     assert arch.name == "Arch Linux" and arch.verdict == VERDICT_LEFTOVER
     assert {c.ref for c in arch.components} == {"nv:0004", "EFI\\Arch"}
     assert any(
-        "partisi nomor 4" in r and "Windows Recovery (NTFS)" in r and "bukan partisi Linux" in r for r in arch.reasons
+        "slot GPT 4" in r and "Windows Recovery (NTFS)" in r and "bukan partisi Linux" in r for r in arch.reasons
     )
 
     orphan = by_key(analysis, "grubdir:grub")
     assert orphan.verdict == VERDICT_LEFTOVER
     assert [c.ref for c in orphan.components] == ["grub"]
     assert any("tidak ada bootloader di EFI\\ yang menunjuk folder ini" in e for e in orphan.components[0].evidence)
-    assert any("77777777-0000-4000-8000-000000000007" in r and "sudah tidak ada" in r for r in orphan.reasons)
+    assert any("77777777-0000-4000-8000-000000000007" in r and "tidak ada di disk yang terpasang" in r for r in orphan.reasons)
 
     hp = by_key(analysis, "other-esp")
     assert hp.verdict == VERDICT_NOT_TARGET and [c.ref for c in hp.components] == ["EFI\\HP"]
@@ -133,13 +135,14 @@ def test_grub_folder_belongs_to_arch_when_its_prefix_points_there(tmp_path):
     assert not any(i.key == "grubdir:grub" for i in analysis.installations)
 
 
-def test_arch_without_readable_prefix_still_leftover_when_no_root_candidate(tmp_path):
+def test_arch_without_readable_prefix_is_unsure_even_without_root_candidate(tmp_path):
+    """Tanpa satu pun rujukan positif, "sisa" tidak terbukti (review Fable 2026-10-22): tidak pasti, bukan sisa."""
     files = laptop_real_esp_files()
     files["EFI\\Arch\\grubx64.efi"] = b"MZ GNU GRUB tanpa modul"
     analysis, _ = analyze_laptop(tmp_path, files)
     arch = by_key(analysis, "efi:arch")
-    assert arch.verdict == VERDICT_LEFTOVER
-    assert any("sudah terhubung ke instalasi lain" in r for r in arch.reasons)
+    assert arch.verdict == VERDICT_UNSURE
+    assert any("sudah terhubung ke instalasi lain" in r and "tidak ada bukti" in r for r in arch.reasons)
     assert "grub" in {c.ref for c in by_key(analysis, "grubdir:grub").components}
 
 
@@ -151,7 +154,8 @@ def test_arch_is_unsure_when_an_unlinked_linux_partition_exists(tmp_path):
     esp = fake_esp(tmp_path, inventory, files)
     entries, notes = real_entries()
     fsinfo = dict(FSINFO, **{"disk0-p6": FsInfo("ext4", uuid="66666666-0000-4000-8000-000000000006", last_mounted="/")})
-    analysis = analyze(inventory, fsinfo, True, entries, esp, collect_esp_refs(tmp_path, esp), notes)
+    analysis = analyze(inventory, fsinfo, True, entries, esp, collect_esp_refs(tmp_path, esp), notes,
+                       gpt_slots=gpt_slots_like_windows(inventory))
     assert by_key(analysis, "efi:arch").verdict == VERDICT_UNSURE
 
 

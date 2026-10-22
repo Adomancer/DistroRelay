@@ -302,6 +302,9 @@ def execution_text(result) -> Text:
     return text
 
 
+_SESSION_KINDS = {"uninstall": "uninstall", "restore": "pulihkan", "shrink-c": "shrink C:"}
+
+
 def journal_text(sessions) -> Text:
     text = Text("Sesi eksekusi\n", style="bold")
     if not sessions:
@@ -318,6 +321,7 @@ def journal_text(sessions) -> Text:
         if s.resolved_by:
             status, style = f"{status}, dituntaskan oleh sesi {s.resolved_by}", "dim"
         text.append(f"  {s.path.stem}  ", style="bold")
+        text.append(f"[{_SESSION_KINDS.get(s.kind, s.kind)}] ", style="dim")
         text.append(f"{status}\n", style=style)
         if s.finished and not s.ok and s.end_message:
             text.append(f"      {s.end_message}\n", style="dim")
