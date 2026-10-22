@@ -239,13 +239,15 @@ def create_backup(
     (local / "firmware-entries.json").write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
     (local / "nvram-raw.json").write_text(json.dumps(report.nvram.raw, indent=2), encoding="utf-8")
     (local / "partitions.json").write_text(report.raw["disks.json"], encoding="utf-8")
+    # UUID filesystem per partisi (dari superblock): setelah partisi dipulihkan, isinya dicocokkan dengan ini.
+    fsinfo = {pid: dataclasses.asdict(info) for pid, info in sorted(report.fsinfo.items())}
+    (local / "fsinfo.json").write_text(json.dumps(fsinfo, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # bcdedit /export juga membuat log transaksi hive (bcd-store.bak.LOG*, tersembunyi); ikut dicadangkan.
     bcd_files = sorted(p.name for p in local.glob("bcd-store.bak*"))
-    result.files = [
-        BackupFile(name, (local / name).stat().st_size, sha256_file(local / name))
-        for name in ("esp.zip", *bcd_files, "firmware-entries.txt", "firmware-entries.json", "nvram-raw.json", "partitions.json")
-    ]
+    names = ("esp.zip", *bcd_files, "firmware-entries.txt", "firmware-entries.json", "nvram-raw.json",
+             "partitions.json", "fsinfo.json")
+    result.files = [BackupFile(name, (local / name).stat().st_size, sha256_file(local / name)) for name in names]
     manifest = {
         "distrorelay": __version__,
         "backup_id": backup_id,

@@ -4,9 +4,9 @@ Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → unin
 
 Masalah awalnya: setelah partisi Linux di-wipe, GRUB masih muncul saat boot karena folder bootloader di EFI System Partition (ESP), entri boot di NVRAM, dan partisi pendukung seperti `/boot` tidak ikut terhapus.
 
-## Status: M0 + M1 + M2a + M2b + M2c (CLI + wizard TUI)
+## Status: M0 + M1 + M2 + M3 (CLI + wizard TUI)
 
-Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` (juga wizard uninstall di TUI) menghapus entri boot dan folder ESP.**
+Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` (juga wizard uninstall di TUI) menghapus entri boot, folder ESP, dan partisi Linux yang dipilih.**
 Jalankan **di VM dulu** (lihat [tests/vm/SCENARIOS.md](tests/vm/SCENARIOS.md)). Di laptop asli, `uninstall` menolak jalan
 kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat sudah dicoba, dan kamu mengonfirmasi bahwa test di VM sudah lolos.
 
@@ -18,7 +18,7 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M2a | Preflight, backup per lapisan + verifikasi + salinan USB, dry-run rencana uninstall, `docs/RECOVERY.md` | ✅ |
 | M2b | Eksekusi uninstall EFI (journal, post-check, `restore`), CLI | ✅ (lolos skenario VM) |
 | M2c | Alur tunggal `UninstallFlow`/`RestoreFlow`; wizard uninstall, menu Pulihkan, dan journal di TUI | ✅ fase A + B lolos VM (sisa: cek 2× reboot skenario 9) |
-| M3 | Hapus partisi Linux | belum |
+| M3 | Hapus partisi Linux (pengaman + ketik ID partisi, aturan backup bertingkat), pulihkan partisi, perluas C: kalau bersebelahan | ✅ kode + test simulasi; skenario VM belum |
 | M4–M7 | Profil + setup Linux, backup Linux, ISO manager, rilis `.exe` | belum |
 
 ## Apa yang dilakukan scan
@@ -70,15 +70,23 @@ python -m venv .venv
 # Jalankan rencana (banyak konfirmasi, terakhir ketik HAPUS).
 # Ctrl+C saat berjalan = selesaikan langkah yang sedang jalan, lalu berhenti dengan rapi.
 # Mode "vm" hanya berlaku kalau komputernya memang terdeteksi VM; di mesin fisik selalu dianggap laptop asli.
+# Key instalasi (efi:fedora) = semua komponennya, termasuk partisinya: ID partisi (mis. disk0-p5) wajib diketik,
+# dan partisi yang mungkin berisi data (root/home/...) juga wajib pernyataan "DATA SUDAH DIBACKUP".
 .venv\Scripts\python.exe -m distrorelay uninstall --select efi:fedora --backup <id>
-# Pulihkan folder ESP / entri boot dari backup
-.venv\Scripts\python.exe -m distrorelay restore --backup <id> --esp-item EFI\fedora --boot-entry Fedora
+# Hanya bagian EFI-nya (tanpa partisi): pilih per komponen; ref-nya terlihat di `plan`
+.venv\Scripts\python.exe -m distrorelay uninstall --select EFI\fedora --select nv:0003 --backup <id>
+# Perluas C: ke ruang bekas partisi (hanya kalau partisinya tepat sesudah C:; sesudahnya tidak bisa dipulihkan)
+.venv\Scripts\python.exe -m distrorelay uninstall --select efi:fedora --extend-c --backup <id>
+# Pulihkan partisi / folder ESP / entri boot dari backup
+.venv\Scripts\python.exe -m distrorelay restore --backup <id> --partition disk0-p5 --esp-item EFI\fedora --boot-entry Fedora
 # Lihat sesi eksekusi, termasuk yang terputus di tengah
 .venv\Scripts\python.exe -m distrorelay journal
 ```
 
 Rencana uninstall selalu berurutan supaya laptop tetap bisa boot ke Windows di setiap titik:
-Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
+Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus → partisi dihapus (layout disk dicek ulang tepat sebelumnya; hanya script persis
+dari rencana yang boleh memanggil `Remove-Partition`) → (opsional) C: diperluas. Ruang bekas partisi dibiarkan unallocated
+kecuali kamu memilih perluas C:. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
 
 Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroRelay\reports\`, `u` wizard uninstall,
 `p` Pulihkan, `j` journal, `q` keluar. Dashboard sendiri read-only. Banner kuning muncul kalau ada sesi uninstall yang belum tuntas.

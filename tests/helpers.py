@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import struct
 import uuid
 from contextlib import contextmanager
@@ -261,6 +263,8 @@ class FakeBcd:
         self.bcd_only: set[str] = set()
         # /delete X ikut menghapus Y (meniru Windows yang memasangkan objek ke Boot#### lain).
         self.collateral: dict[str, str] = {}
+        # Tabel partisi (format output DISKS_SCRIPT), berubah lewat script hapus/buat ulang partisi & perluas C:.
+        self.disks = json.loads(fixture_text("disks_laptop.json"))
 
     def add(self, identifier: str, description: str, path: str | None, *, in_order: bool = True) -> None:
         self.entries[identifier] = {"description": description, "path": path}
@@ -284,7 +288,15 @@ class FakeBcd:
                 return CommandResult(args, 1, "", error)
         script = decode_powershell(args)
         if script is not None:
-            return ok({"ps:disks": fixture_text("disks_laptop.json"), "ps:bitlocker": self.bitlocker,
+            partition_scripts = {
+                "ps:delete-partition": self._delete_partition,
+                "ps:restore-partition": self._restore_partition,
+                "ps:extend-c": self._extend_c,
+            }
+            if key in partition_scripts:
+                error = partition_scripts[key](script)
+                return CommandResult(args, 1, "", error) if error else ok()
+            return ok({"ps:disks": json.dumps(self.disks), "ps:bitlocker": self.bitlocker,
                        "ps:authenticode": self.signature}.get(key, ""))
         if key.startswith("mountvol"):
             return ok()
@@ -318,6 +330,45 @@ class FakeBcd:
             self.order = [i for i in self.order if i != low[3]] + [low[3]]
             return ok("The operation completed successfully.")
         return CommandResult(args, 1, "", f"FakeBcd: perintah tidak dikenal {key!r}")
+
+    # --- Partisi (meniru Remove-Partition / New-Partition / Resize-Partition) ---
+    def partition(self, guid: str) -> dict | None:
+        wanted = "{" + guid.strip("{}").lower() + "}"
+        return next((p for p in self.disks["Partitions"] if p["Guid"].lower() == wanted), None)
+
+    def _delete_partition(self, script: str) -> str | None:
+        guid = re.search(r"\$_\.Guid -eq '(\{[0-9a-f-]+\})'", script).group(1)
+        part = self.partition(guid)
+        if part is None:
+            return f"Partisi {guid} tidak ditemukan"
+        self.disks["Partitions"].remove(part)
+        return None
+
+    def _restore_partition(self, script: str) -> str | None:
+        offset = int(re.search(r"-Offset (\d+)", script).group(1))
+        size = int(re.search(r"-Size (\d+)", script).group(1))
+        gpt_type = re.search(r"-GptType '(\{[0-9a-f-]+\})'", script).group(1)
+        parts = self.disks["Partitions"]
+        if any(p["Offset"] < offset + size and p["Offset"] + p["Size"] > offset for p in parts):
+            return "Ruangnya sudah dipakai partisi lain"
+        used = {p["PartitionNumber"] for p in parts}
+        number = next(n for n in range(1, 129) if n not in used)  # slot GPT kosong pertama, seperti Windows
+        parts.append({
+            "DiskNumber": 0, "PartitionNumber": number, "Guid": "{" + str(uuid.uuid4()) + "}", "GptType": gpt_type,
+            "Offset": offset, "Size": size, "DriveLetter": "\x00", "AccessPaths": [None], "IsBoot": False,
+            "IsSystem": False, "IsHidden": False, "Type": "Unknown", "FileSystem": None, "FileSystemLabel": None,
+        })
+        return None
+
+    def _extend_c(self, script: str) -> str | None:
+        c = next(p for p in self.disks["Partitions"] if p["DriveLetter"] == "C")
+        end = c["Offset"] + c["Size"]
+        later = [p["Offset"] for p in self.disks["Partitions"] if p["Offset"] >= end]
+        limit = min(later) if later else self.disks["Disks"][0]["Size"] - 2**20
+        if limit <= end:
+            return "Tidak ada ruang kosong tepat sesudah C:"
+        c["Size"] = limit - c["Offset"]
+        return None
 
     # --- Tampilan seperti bcdedit /enum firmware /v ---
     def render(self) -> str:

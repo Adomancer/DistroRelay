@@ -19,7 +19,8 @@ from distrorelay.tui.uninstall import (
     UnfinishedScreen,
 )
 from distrorelay.windows.journal import Journal, read_journal, sessions
-from test_execute import ARCH, FEDORA, SELECT
+from helpers import P5_GUID
+from test_execute import ARCH, FEDORA, INSTALLATIONS
 from test_restore_flow import fedora_entries, uninstalled
 from test_workflow import HP, VBOX, make_flow
 
@@ -71,7 +72,7 @@ async def check_installations(pilot, app, keys) -> CheckTree:
 
 async def through_backup(pilot, app) -> None:
     """Pilih → preflight (konfirmasi USB darurat) → backup baru ke drive eksternal simulasi."""
-    await check_installations(pilot, app, SELECT)
+    await check_installations(pilot, app, INSTALLATIONS)
     assert next_enabled(app)
     await click(pilot, "#next")
 
@@ -90,7 +91,11 @@ async def through_backup(pilot, app) -> None:
     assert isinstance(app.screen, ConfirmScreen)
 
 
-async def type_word(pilot, app, word: str) -> None:
+async def type_word(pilot, app, word: str, fill_required: bool = True) -> None:
+    """Ketik kata di isian #word lalu Enter. Di layar konfirmasi, isian wajib lain (ID partisi) diisi dulu."""
+    if fill_required and isinstance(app.screen, ConfirmScreen):
+        for n, required in enumerate(app.screen.required):
+            app.screen.query_one(f"#typed-{n}", Input).value = required.word
     field = app.screen.query_one("#word", Input)
     field.value = word
     field.focus()
@@ -127,6 +132,7 @@ def test_wizard_runs_the_whole_flow_in_a_vm(tmp_path):
             await settle(pilot)
             assert "post-check hijau" in status(app), status(app)
             assert FEDORA not in bcd.entries and ARCH not in bcd.entries
+            assert bcd.partition(P5_GUID) is None  # partisi /boot Fedora ikut dihapus (M3)
             [summary] = sessions(tmp_path / "journal")
             assert summary.ok and summary.post_check_ok
             assert read_journal(summary.path)[0].data["where"] == "vm"
@@ -264,6 +270,8 @@ def test_unfinished_session_must_be_acknowledged_first(tmp_path):
 
 def test_blocked_components_cannot_be_checked(tmp_path):
     flow, bcd, ext = make_flow(tmp_path)
+    p5 = bcd.partition(P5_GUID)
+    p5["DriveLetter"], p5["AccessPaths"] = "L", ["L:\\"]  # mis. di-mount lewat driver ext4 di Windows
     app = DistroRelayApp(deps=flow.deps)
 
     async def scenario():
@@ -273,7 +281,8 @@ def test_blocked_components_cannot_be_checked(tmp_path):
             await settle(pilot)
             tree = app.screen.query_one(CheckTree)
             blocked = [n for n in tree._components if n.data["candidate"].blocked]
-            assert any(n.data["candidate"].component.kind == "partition" for n in blocked)  # hapus partisi = M3
+            [partition] = [n.data["candidate"] for n in blocked if n.data["candidate"].component.kind == "partition"]
+            assert "drive letter" in partition.blocked
             for node in blocked:
                 tree.move_cursor(node)
                 await pilot.press("space")

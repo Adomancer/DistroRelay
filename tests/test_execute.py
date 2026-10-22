@@ -24,7 +24,10 @@ from distrorelay.windows.scanner import run_scan
 from distrorelay.windows.uninstall_plan import build_plan, expand_selection
 from helpers import BOOTMGFW, SHIM, fake_mount, laptop_world
 
-SELECT = ["efi:fedora", "efi:arch", "grubdir:grub"]
+# Tiga instalasi sisa di laptop simulasi. Memilih instalasi = semua komponennya, termasuk partisi disk0-p5 (M3).
+INSTALLATIONS = ["efi:fedora", "efi:arch", "grubdir:grub"]
+# Komponen EFI-nya saja (entri + folder), untuk test alur M2 tanpa hapus partisi.
+SELECT = ["nv:0003", "EFI\\fedora", "nv:0004", "EFI\\Arch", "grub"]
 FEDORA = "{8bd7fdcc-13ca-11f1-84fe-806e6f6e6963}"
 ARCH = "{fb3dba71-dd51-11f0-8498-806e6f6e6963}"
 
@@ -50,7 +53,7 @@ def world(tmp_path, select=SELECT, local_only=False, setup=None):
     report = run_scan(deps())
     refs, unknown = expand_selection(report.analysis, select)
     assert unknown == []
-    plan = build_plan(report.analysis, report.boot_entries, refs)
+    plan = build_plan(report.analysis, report.boot_entries, refs, inventory=report.inventory, fsinfo=report.fsinfo)
     backup = create_backup(
         report,
         backup_runner(bcd, root=tmp_path / "local"),
@@ -89,7 +92,7 @@ def test_full_uninstall_then_post_check(tmp_path):
     bcd, esp_root, deps, report, plan, backup = world(tmp_path)
     gate = gate_for(tmp_path, plan, report, backup)
     assert gate.ok, gate.problems
-    assert gate.notes == ["Dilewati (M3): disk0-p5: hapus partisi baru tersedia di M3"]
+    assert gate.notes == []
 
     result, journal = run(tmp_path, bcd, esp_root, plan, gate.manifest)
     assert result.completed, result.stopped
@@ -284,12 +287,12 @@ def test_entry_seen_only_in_bcdedit_is_blocked(tmp_path):
         bcd.add(orphan, "Fedora", "\\EFI\\fedora\\shimx64.efi", in_order=False)
         bcd.bcd_only.add(orphan)
 
-    bcd, esp_root, deps, report, plan, backup = world(tmp_path, setup=setup)
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path, select=INSTALLATIONS, setup=setup)
     assert orphan not in {a.data.get("bcd_id") for a in plan.actions}
     assert FEDORA in {a.data.get("bcd_id") for a in plan.actions}  # Fedora asli tetap dipasangkan dengan benar
     assert any("hanya terlihat di bcdedit" in b for b in plan.blocked)
     gate = gate_for(tmp_path, plan, report, backup)
-    assert not gate.ok  # blokir selain M3 = rencana tidak boleh jalan
+    assert not gate.ok  # ada yang diblokir = rencana tidak boleh jalan
 
 
 def test_entry_repaired_differently_at_execution_stops_before_delete(tmp_path):

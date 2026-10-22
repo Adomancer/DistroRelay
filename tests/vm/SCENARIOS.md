@@ -101,6 +101,24 @@ dan sesekali freeze total (juga sebelum DistroRelay dijalankan). Script bantu: `
 `tesvm\reboot-check.ps1` (reset + `bcdedit /enum firmware`). Temuan: dashboard 1 baris lebih tinggi dari layar → baris
 status tergulung keluar di terminal sungguhan (diperbaiki dengan CSS, ada test regresi).
 
+## Gate M3: hapus & pulihkan partisi (lewat TUI)
+
+Mulai dari snapshot `siap-uninstall` (sisa palsu dari `fake_leftovers.py` sudah termasuk partisi XBOOTLDR 2 GB; di VM
+biasanya `disk0-p6`), lalu pasang kode terbaru dengan `Z:\setup.ps1`. Memilih instalasi Fedora di wizard sekarang ikut
+mencentang partisinya. Partisi itu berperan `/boot`, jadi cukup ketik ID partisinya, tanpa pernyataan backup data.
+
+| # | Lewat TUI | Yang dicek | Lolos |
+|---|---|---|---|
+| M3-1 | `u` → vm → centang `efi:fedora`, `efi:arch`, `grubdir:grub` → preflight → backup → ketik ID partisi + `HAPUS` | Langkah terakhir "Hapus partisi"; post-check hijau termasuk "Partisi yang dihapus sudah tidak ada" dan "Layout disk lain tidak berubah"; Disk Management menampilkan 2 GB unallocated; restart langsung masuk Windows | [ ] |
+| M3-2 | Di layar konfirmasi, ketik ID partisi yang salah (mis. `disk0-p4`) | Ditolak "Belum cocok", tidak ada yang diubah | [ ] |
+| M3-3 | `p` → backup yang dibuat sebelum M3-1 → centang partisinya → `PULIHKAN` | Partisi kembali dengan offset/ukuran/tipe sama, "UUID filesystem sama"; dashboard menampilkannya lagi sebagai `/boot` Fedora | [ ] |
+| M3-4 | Ulangi M3-1, tapi setelah gerbang lolos buat partisi kecil baru di ruang kosong lewat Disk Management, baru ketik `HAPUS` | Langkah partisi berhenti "Layout disk … tidak sama"; partisi Linux masih ada | [ ] |
+| M3-5 | Beri partisi Linux drive letter (Disk Management → Change Drive Letter), lalu scan ulang | Partisi tidak bisa dicentang: "punya drive letter / mount point" | [ ] |
+| M3-6 (opsional) | Layout dengan partisi Linux tepat sesudah C: (mis. VM tanpa Recovery di antaranya) → centang "Perluas C:" | C: bertambah, post-check "C: diperluas"; sesudahnya Pulihkan menolak partisi itu "ruangnya sudah dipakai" | [ ] |
+
+Di laptop asli, ruang bekas `disk0-p5` **tidak** bersebelahan dengan C: (ada `disk0-p4` Windows Recovery di antaranya),
+jadi opsi Perluas C: tidak muncul dan ruangnya dibiarkan unallocated untuk distro berikutnya.
+
 ## Khusus M2a (sudah bisa dicoba sekarang)
 
 - [ ] `distrorelay backup --usb <huruf>` di VM: semua verifikasi `[ok]`, folder `esp\` di USB lengkap

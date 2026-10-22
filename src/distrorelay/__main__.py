@@ -40,8 +40,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan", help="dry-run rencana uninstall (tidak menjalankan apa pun)")
     plan.add_argument(
         "--select", action="append", default=[], metavar="KEY",
-        help="key instalasi (mis. efi:fedora) atau ref komponen; boleh diulang",
+        help="key instalasi (mis. efi:fedora, termasuk partisinya) atau ref komponen; boleh diulang",
     )
+    plan.add_argument("--extend-c", action="store_true",
+                      help="perluas C: ke ruang bekas partisi (hanya kalau partisinya tepat sesudah C:)")
     backup = commands.add_parser("backup", help="preflight + backup per lapisan + verifikasi (tidak mengubah sistem)")
     target = backup.add_mutually_exclusive_group()
     target.add_argument(
@@ -60,11 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     uninstall.add_argument("--select", action="append", default=[], metavar="KEY", help="sama seperti di `plan`")
     uninstall.add_argument("--backup", metavar="ID", help="ID backup yang sudah ada salinannya di drive eksternal")
-    restore = commands.add_parser("restore", help="pulihkan folder ESP dan/atau entri boot dari backup")
+    uninstall.add_argument("--extend-c", action="store_true", help="sama seperti di `plan`")
+    restore = commands.add_parser("restore", help="pulihkan partisi Linux, folder ESP, dan/atau entri boot dari backup")
     restore.add_argument("--backup", metavar="ID", required=True)
     restore.add_argument("--esp-item", action="append", default=[], metavar="PATH", help="mis. EFI\\fedora")
     restore.add_argument("--boot-entry", action="append", default=[], metavar="NAMA",
                          help="nama entri (mis. Fedora), atau nomornya (mis. Boot0007) kalau namanya dipakai lebih dari satu entri")
+    restore.add_argument("--partition", action="append", default=[], metavar="ID",
+                         help="partisi Linux dari backup (mis. disk0-p5 atau GUID partisinya)")
     commands.add_parser("journal", help="tampilkan sesi eksekusi, termasuk yang terputus di tengah")
     return parser
 
@@ -148,7 +153,8 @@ def _run_plan_command(args: argparse.Namespace) -> int:
     refs, unknown = expand_selection(report.analysis, args.select)
     for selector in unknown:
         console.print(f"Tidak dikenal: {selector}", style="red", markup=False)
-    plan = build_plan(report.analysis, report.boot_entries, refs)
+    plan = build_plan(report.analysis, report.boot_entries, refs, inventory=report.inventory, fsinfo=report.fsinfo,
+                      extend_c=args.extend_c)
     console.print(render.plan_text(plan))
     return 1 if unknown else 0
 
@@ -238,7 +244,7 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
 
     from . import render
     from .windows.stopping import StopSignal, console_stop_guard
-    from .windows.workflow import CONTINUE_WORD, DELETE_WORD, UninstallFlow, default_deps
+    from .windows.workflow import CONTINUE_WORD, DELETE_WORD, UninstallFlow, default_deps, typed
 
     console = Console()
     flow = flow or UninstallFlow(default_deps())
@@ -283,7 +289,7 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
         return 1
 
     report = _scan_with_status(console, flow)
-    plan = flow.select(args.select)
+    plan = flow.select(args.select, extend_c=getattr(args, "extend_c", False))
     if flow.unknown:
         console.print(f"Tidak dikenal: {', '.join(flow.unknown)}", style="red", markup=False)
         return 1
@@ -312,7 +318,14 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
             "di jendela PowerShell/CMD.",
             style="yellow",
         )
-    ticket = flow.authorize(_ask_word(f"Ketik {DELETE_WORD} untuk menjalankan, atau Enter untuk batal: "))
+    typed_words = {}
+    for required in flow.required_typing():
+        console.print(f"\n{required.prompt}", style="bold yellow", markup=False)
+        typed_words[required.key] = _ask_word(f"{required.title} (ketik {required.word}): ")
+        if not typed(typed_words[required.key], required.word):
+            console.print("Tidak cocok. Dibatalkan, tidak ada yang diubah.")
+            return 1
+    ticket = flow.authorize(_ask_word(f"Ketik {DELETE_WORD} untuk menjalankan, atau Enter untuk batal: "), typed_words)
     if ticket is None:
         console.print("Dibatalkan. Tidak ada yang diubah.")
         return 1
@@ -357,12 +370,16 @@ def _run_restore_command(args: argparse.Namespace, flow=None) -> int:
     if failed:
         console.print(render.verifications_text("Backup tidak valid", failed))
         return 1
-    if not args.esp_item and not args.boot_entry:
-        console.print("Pilih yang mau dipulihkan dengan --esp-item PATH dan/atau --boot-entry NAMA atau Boot####.")
+    partitions = getattr(args, "partition", [])
+    if not args.esp_item and not args.boot_entry and not partitions:
+        console.print("Pilih yang mau dipulihkan dengan --partition ID, --esp-item PATH, dan/atau --boot-entry NAMA atau Boot####.")
+        for choice in flow.partition_choices():
+            note = f"  ({choice.blocked})" if choice.blocked else ""
+            console.print(f"Partisi di backup: {choice.label}{note}", markup=False)
         console.print("Folder/file di backup: " + ", ".join(c.key for c in flow.esp_choices()), markup=False)
         console.print("Entri di backup: " + ", ".join(c.label for c in flow.entry_choices()), markup=False)
         return 1
-    problem = flow.select(args.esp_item, args.boot_entry)
+    problem = flow.select(args.esp_item, args.boot_entry, partitions)
     if problem:
         console.print(problem, style="red", markup=False)
         return 1

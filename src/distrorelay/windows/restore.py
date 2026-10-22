@@ -12,8 +12,10 @@ import zipfile
 from pathlib import Path
 from typing import Sequence
 
+from . import gpt_types
 from .backup import Verification, sha256_file
 from .bootentries import load_firmware
+from .disks import DiskInventory, Partition
 from .esp import norm_path
 from .execute import WELL_KNOWN_IDS, _exe
 from .runner import AllowListRunner, Runner
@@ -22,8 +24,9 @@ _GUID = re.compile(r"\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 _EFI_PATH = re.compile(r"^\\efi\\[^\\]+\\.+\.efi$", re.IGNORECASE)
 
 
-def restore_runner(inner: Runner) -> tuple[AllowListRunner, set[str]]:
-    """Runner tahap pemulihan. `bcdedit /delete` hanya untuk GUID yang dibuat sendiri di sesi ini (rollback)."""
+def restore_runner(inner: Runner, scripts: frozenset[str] = frozenset()) -> tuple[AllowListRunner, set[str]]:
+    """Runner tahap pemulihan. `bcdedit /delete` hanya untuk GUID yang dibuat sendiri di sesi ini (rollback).
+    `scripts` = script PowerShell persis yang boleh jalan (buat ulang partisi tertentu dari backup)."""
     created: set[str] = set()
 
     def is_guid(value: str) -> bool:
@@ -47,7 +50,54 @@ def restore_runner(inner: Runner) -> tuple[AllowListRunner, set[str]]:
     def rollback(args):
         return _exe(args) == "bcdedit" and len(args) == 3 and args[1].lower() == "/delete" and args[2].lower() in created
 
-    return AllowListRunner(inner, rules=(copy_bootmgr, set_path, add_last, rollback)), created
+    return AllowListRunner(inner, rules=(copy_bootmgr, set_path, add_last, rollback), scripts=scripts), created
+
+
+# --- Partisi (M3) ------------------------------------------------------------------
+
+
+def partition_restore_refusal(part: Partition, backup_layout: DiskInventory, current: DiskInventory | None) -> str | None:
+    """Kenapa partisi dari backup tidak bisa dibuat ulang sekarang (None = bisa)."""
+    if part.category != gpt_types.LINUX:
+        return "Hanya partisi Linux yang dipulihkan dari sini"
+    if current is None:
+        return "Daftar disk sekarang tidak terbaca"
+    if current.by_guid(part.guid) is not None:
+        return "Masih ada di disk, tidak perlu dipulihkan"
+    backup_disk = backup_layout.disk(part.disk_number)
+    disk = next((d for d in current.disks if backup_disk and d.guid == backup_disk.guid), None)
+    if disk is None:
+        return "Disk asalnya tidak ditemukan (GUID disk berbeda)"
+    if part.end > disk.size:
+        return "Melewati ujung disk"
+    for other in current.partitions_on(disk.number):
+        if other.offset < part.end and other.end > part.offset:
+            return f"Ruangnya sudah dipakai {other.id} ({other.type_name})"
+    return None
+
+
+def partition_restore_script(part: Partition, disk_guid: str) -> str:
+    """Buat ulang entri GPT dengan offset, ukuran, dan tipe yang sama persis. Datanya tidak disentuh, jadi isi
+    partisi kembali utuh selama ruangnya belum ditimpa. GUID partisi (PARTUUID) yang baru berbeda."""
+    disk, gpt_type = _braced(disk_guid), _braced(part.gpt_type)
+    start, end = int(part.offset), int(part.offset) + int(part.size)
+    return f"""# distrorelay:restore-partition
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$d = @(Get-Disk | Where-Object {{ $_.Guid -eq '{disk}' }})
+if ($d.Count -ne 1) {{ throw 'Disk {disk} tidak ditemukan' }}
+$d = $d[0]
+$used = @(Get-Partition -DiskNumber $d.Number | Where-Object {{ $_.Offset -lt {end} -and ($_.Offset + $_.Size) -gt {start} }})
+if ($used.Count) {{ throw 'Ruangnya sudah dipakai partisi lain' }}
+$null = New-Partition -DiskNumber $d.Number -Offset {start} -Size {int(part.size)} -GptType '{gpt_type}'
+"""
+
+
+def _braced(value: str | None) -> str:
+    text = (value or "").strip("{}").lower()
+    if not _GUID.fullmatch("{" + text + "}"):
+        raise ValueError(f"GUID tidak valid: {value!r}")
+    return "{" + text + "}"
 
 
 def protected_esp_item(item: str) -> bool:

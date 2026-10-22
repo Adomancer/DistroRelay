@@ -143,6 +143,25 @@ class DiskInventory:
                 regions.append(FreeRegion(disk.number, cursor, usable_end - cursor))
         return regions
 
+    def layout(self) -> set[tuple]:
+        """Layout per GUID (tidak bergantung nomor disk/partisi): (GUID disk, GUID partisi, tipe, offset, ukuran)."""
+        guid_of = {d.number: d.guid or f"disk{d.number}" for d in self.disks}
+        return {
+            (guid_of.get(p.disk_number, f"disk{p.disk_number}"), p.guid or p.id, p.gpt_type or "", p.offset, p.size)
+            for p in self.partitions
+        }
+
+    def next_partition(self, part: Partition) -> Partition | None:
+        """Partisi berikutnya (menurut offset) di disk yang sama."""
+        later = [p for p in self.partitions_on(part.disk_number) if p.offset > part.offset]
+        return later[0] if later else None
+
+    def windows_partition(self) -> Partition | None:
+        """Partisi Windows (C:): yang ber-drive letter C, atau IsBoot."""
+        return next((p for p in self.partitions if p.drive_letter == "C"), None) or next(
+            (p for p in self.partitions if p.is_boot), None
+        )
+
     def fingerprint(self) -> str:
         """Sidik jari layout disk. Berubah kalau ada partisi yang dibuat/dihapus/digeser."""
         items = sorted(

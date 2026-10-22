@@ -20,6 +20,7 @@ Isi folder backup:
 | `firmware-entries.txt` / `.json` | Daftar entri boot firmware (nama, GUID, path `.efi`) | C |
 | `nvram-raw.json` | Isi mentah `BootOrder` dan `Boot####` | C (manual) |
 | `partitions.json` | Metadata semua partisi (offset, ukuran, tipe GPT, GUID) | D |
+| `fsinfo.json` | Jenis + UUID filesystem tiap partisi (dari superblock), untuk memastikan partisi yang dipulihkan isinya sama | D |
 | `manifest.json` | Hash SHA256 semua file di atas | semua |
 
 ## Masuk ke Command Prompt darurat
@@ -84,8 +85,22 @@ Atau bangun ulang dengan bagian A langkah 1.
 
 ## D. Partisi terhapus keliru (M3)
 
-Selama ruang bekasnya **belum dipakai** (belum diisi distro baru), partisi bisa dibuat ulang dengan offset dan ukuran yang sama persis dari `partitions.json`, dan datanya kembali utuh:
+`Remove-Partition` hanya menghapus entri di tabel GPT; datanya belum ditimpa. Selama ruang bekasnya **belum dipakai**
+(belum diisi distro baru, dan C: belum diperluas ke sana), partisi bisa dibuat ulang dengan offset, ukuran, dan tipe
+yang sama persis, dan isinya kembali utuh.
+
+Cara termudah (Windows masih bisa boot): menu **Pulihkan** (`p` di dashboard), centang partisinya, ketik `PULIHKAN`.
+Lewat CLI:
 ```powershell
+.venv\Scripts\python.exe -m distrorelay restore --backup <id> --partition disk0-p5
+```
+DistroRelay menolak kalau ruangnya sudah dipakai partisi lain, lalu sesudahnya scan ulang dan mencocokkan UUID
+filesystem dengan `fsinfo.json` di backup.
+
+Manual (PowerShell Administrator), dengan angka dari `partitions.json` (cari partisi dengan `PartitionNumber` yang dihapus):
+```powershell
+Get-Partition -DiskNumber 0 | Format-Table PartitionNumber, Offset, Size   # pastikan ruangnya kosong
 New-Partition -DiskNumber 0 -Offset <Offset> -Size <Size> -GptType '{<GptType>}'
 ```
-PARTUUID-nya akan berbeda, tapi UUID filesystem dan isinya tetap sama. Menu Pulihkan di DistroRelay melakukan ini otomatis (M3).
+PARTUUID-nya akan berbeda, tapi UUID filesystem dan isinya tetap sama. Kalau distro yang memakainya merujuk partisi
+lewat PARTUUID (jarang; biasanya lewat UUID filesystem), perbarui rujukannya dari live USB Linux.

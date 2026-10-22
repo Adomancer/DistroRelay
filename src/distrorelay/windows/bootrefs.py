@@ -545,6 +545,35 @@ class _Group:
     notes: list[str] = field(default_factory=list)
 
 
+# Peran yang isinya bisa dibuat ulang (tidak menyimpan data pengguna): cukup backup metadata GPT sebelum dihapus.
+DISPOSABLE_ROLES = frozenset({"boot", "swap"})
+
+
+def partition_role(part: Partition, fsinfo: Mapping[str, FsInfo]) -> str:
+    """Peran partisi Linux: root, boot, home, swap, data, mungkin-root, atau tidak-diketahui."""
+    info = fsinfo.get(part.id)
+    if part.gpt_type == gpt_types.LINUX_ROOT_X86_64:
+        return "root"
+    if part.gpt_type == gpt_types.LINUX_HOME:
+        return "home"
+    if part.category == "esp":
+        return "boot"
+    if info is None:
+        return "swap" if part.gpt_type == gpt_types.LINUX_SWAP else "tidak-diketahui"
+    if info.fs_type == "swap":
+        return "swap"
+    mounted = info.last_mounted
+    if mounted == "/":
+        return "root"
+    if mounted in ("/boot", "/boot/efi", "/efi") or part.gpt_type == gpt_types.XBOOTLDR:
+        return "boot"
+    if mounted and mounted.startswith("/home"):
+        return "home"
+    if mounted:
+        return "data"
+    return "mungkin-root"
+
+
 class _Context:
     def __init__(self, inventory, fsinfo, fs_probe_complete, esp):
         self.inventory: DiskInventory = inventory or DiskInventory()
@@ -614,28 +643,7 @@ class _Context:
         return f"Merujuk {ref.kind} {ref.value} (dari {ref.source}) yang sudah tidak ada di disk mana pun"
 
     def role(self, part: Partition) -> str:
-        """Peran partisi Linux: root, boot, home, swap, data, mungkin-root, atau tidak-diketahui."""
-        info = self.fsinfo.get(part.id)
-        if part.gpt_type == gpt_types.LINUX_ROOT_X86_64:
-            return "root"
-        if part.gpt_type == gpt_types.LINUX_HOME:
-            return "home"
-        if part.category == "esp":
-            return "boot"
-        if info is None:
-            return "swap" if part.gpt_type == gpt_types.LINUX_SWAP else "tidak-diketahui"
-        if info.fs_type == "swap":
-            return "swap"
-        mounted = info.last_mounted
-        if mounted == "/":
-            return "root"
-        if mounted in ("/boot", "/boot/efi", "/efi") or part.gpt_type == gpt_types.XBOOTLDR:
-            return "boot"
-        if mounted and mounted.startswith("/home"):
-            return "home"
-        if mounted:
-            return "data"
-        return "mungkin-root"
+        return partition_role(part, self.fsinfo)
 
     def partition_evidence(self, part: Partition) -> list[str]:
         info = self.fsinfo.get(part.id)

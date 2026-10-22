@@ -60,6 +60,7 @@ def test_full_backup_is_verified_locally_and_on_usb(tmp_path):
         "firmware-entries.json",
         "nvram-raw.json",
         "partitions.json",
+        "fsinfo.json",
     ]
     # Pengecekan BCD dijalankan pada salinan sementara, jadi file backup tidak ikut berubah.
     store_call = next(c for c in fake.calls if c[:2] == ("bcdedit", "/store"))

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from ..format import human_size
-from . import disks, flush
+from . import disks, flush, gpt_types
 from .backup import BackupResult, Verification, backup_runner, backups_root, create_backup, verify_backup_dir
 from .bootrefs import Component, Installation
 from .esp import norm_path
@@ -37,6 +37,8 @@ from .preflight import PreflightResult, external_volumes
 from .restore import (
     describe_entry,
     entry_label,
+    partition_restore_refusal,
+    partition_restore_script,
     protected_esp_item,
     restore_boot_entry,
     restore_esp_items,
@@ -44,7 +46,7 @@ from .restore import (
     select_backup_entries,
     unrestorable_reason,
 )
-from .runner import Runner
+from .runner import ReadOnlyRunner, Runner, powershell_args
 from .scanner import ScanReport
 from .stopping import StopSignal
 from .uninstall_plan import SELECTABLE_KINDS, UninstallPlan, build_plan, expand_selection
@@ -52,6 +54,19 @@ from .uninstall_plan import SELECTABLE_KINDS, UninstallPlan, build_plan, expand_
 CONTINUE_WORD = "LANJUT"
 DELETE_WORD = "HAPUS"
 RESTORE_WORD = "PULIHKAN"
+# Partisi yang mungkin berisi data pribadi (root, home, data, tidak dikenal): backup Linux DistroRelay baru ada di M5,
+# jadi syaratnya pernyataan yang diketik (plan: aturan backup bertingkat).
+DATA_WORD = "DATA SUDAH DIBACKUP"
+
+
+@dataclass(frozen=True)
+class TypedConfirmation:
+    """Kata yang wajib diketik persis sebelum tiket eksekusi terbit (selain HAPUS)."""
+
+    key: str
+    title: str
+    prompt: str
+    word: str
 
 # Syarat proses dari plan yang tidak bisa dicek kode; wajib dinyatakan di mode "asli".
 REAL_MACHINE_STATEMENTS = {
@@ -268,17 +283,53 @@ class UninstallFlow:
             if inst.kind not in SELECTABLE_KINDS:
                 continue
             for comp in inst.components:
-                blocked = build_plan(analysis, self.report.boot_entries, [comp.ref]).blocked
+                blocked = build_plan(
+                    analysis, self.report.boot_entries, [comp.ref],
+                    inventory=self.report.inventory, fsinfo=self.report.fsinfo,
+                ).blocked
                 found.append(Candidate(inst, comp, blocked[0] if blocked else None))
         return found
 
-    def select(self, selectors: Sequence[str]) -> UninstallPlan:
+    def select(self, selectors: Sequence[str], extend_c: bool = False) -> UninstallPlan:
         if self.report is None or self.report.analysis is None:
             raise FlowError("Scan dulu (analisis belum ada)")
         refs, self.unknown = expand_selection(self.report.analysis, list(selectors))
-        self.plan = build_plan(self.report.analysis, self.report.boot_entries, refs)
+        self.plan = build_plan(
+            self.report.analysis, self.report.boot_entries, refs,
+            inventory=self.report.inventory, fsinfo=self.report.fsinfo, extend_c=extend_c,
+        )
         self._changed()
         return self.plan
+
+    def required_typing(self) -> list[TypedConfirmation]:
+        """Kata yang wajib diketik untuk rencana ini selain HAPUS: ID tiap partisi, plus pernyataan backup data."""
+        required = []
+        for action in self.plan.actions if self.plan else []:
+            if action.kind != "delete-partition":
+                continue
+            pid, role = action.data["id"], action.data.get("role")
+            required.append(
+                TypedConfirmation(f"id:{pid}", f"ID partisi {pid}", f"Ketik ID partisi yang akan dihapus ({pid})", pid)
+            )
+            if action.data.get("needs_data_statement"):
+                required.append(
+                    TypedConfirmation(
+                        f"data:{pid}",
+                        f"Backup data {pid}",
+                        f"Partisi {pid} berperan '{role}', jadi bisa berisi data pribadi. Daftar paket + dotfiles "
+                        "BUKAN backup dokumen/foto/kode. Kalau datanya sudah kamu backup sendiri (atau memang tidak "
+                        f"perlu), ketik {DATA_WORD}",
+                        DATA_WORD,
+                    )
+                )
+        return required
+
+    def typing_problems(self, typed_words: Mapping[str, str]) -> list[str]:
+        return [
+            f"{t.title}: ketik {t.word} persis"
+            for t in self.required_typing()
+            if not typed(typed_words.get(t.key), t.word)
+        ]
 
     # --- 4. Preflight & konfirmasi manual ------------------------------------
     def run_preflight(self) -> PreflightResult:
@@ -361,11 +412,12 @@ class UninstallFlow:
         self.gate_result = result
         return result
 
-    def authorize(self, word: str) -> GateTicket | None:
-        """Terbitkan tiket eksekusi kalau gerbang lolos dan HAPUS diketik persis. None = tidak diketik."""
+    def authorize(self, word: str, typed_words: Mapping[str, str] | None = None) -> GateTicket | None:
+        """Terbitkan tiket eksekusi kalau gerbang lolos, HAPUS diketik persis, dan semua kata wajib lain
+        (`required_typing`, mis. ID partisi) juga diketik persis. None = ada yang tidak diketik dengan benar."""
         if self.gate_result is None or not self.gate_result.ok:
             raise FlowError("Gerbang belum lolos")
-        if not typed(word, DELETE_WORD):
+        if not typed(word, DELETE_WORD) or self.typing_problems(typed_words or {}):
             return None
         self._ticket = GateTicket(
             plan_hash(self.plan),
@@ -433,6 +485,8 @@ class UninstallFlow:
                 progress=progress,
                 fail_after=self.deps.fail_after,
                 stop=stop,
+                inventory=self.report.inventory,
+                load_inventory=self.deps.load_inventory,
                 **extra,
             )
         return self.execution
@@ -462,6 +516,7 @@ class RestoreTicket:
     manifest_hash: str
     esp_items: tuple[str, ...]
     entries: tuple[str, ...]
+    partitions: tuple[str, ...]
     generation: int
 
 
@@ -473,6 +528,16 @@ def _durable(label: str, action: Callable[[], None]) -> Verification:
     return Verification(label, True, "Ya")
 
 
+def _partition_at(inventory: disks.DiskInventory, disk_guid: str, part: disks.Partition) -> disks.Partition | None:
+    """Partisi di disk `disk_guid` dengan offset, ukuran, dan tipe yang sama dengan `part`."""
+    numbers = {d.number for d in inventory.disks if d.guid == disk_guid}
+    return next(
+        (p for p in inventory.partitions
+         if p.disk_number in numbers and (p.offset, p.size, p.gpt_type) == (part.offset, part.size, part.gpt_type)),
+        None,
+    )
+
+
 def _esp_group(path: str) -> str:
     """'EFI\\fedora\\shimx64.efi' -> 'EFI\\fedora'; 'grub\\grub.cfg' -> 'grub'; 'mach_kernel' -> 'mach_kernel'."""
     parts = path.split("\\")
@@ -480,16 +545,20 @@ def _esp_group(path: str) -> str:
 
 
 class RestoreFlow:
-    """Pulihkan folder/file ESP dan entri boot firmware dari backup DistroRelay (menu Pulihkan)."""
+    """Pulihkan folder/file ESP, entri boot firmware, dan partisi Linux dari backup DistroRelay (menu Pulihkan)."""
 
     def __init__(self, deps: FlowDeps):
         self.deps = deps
         self.backup_id: str | None = None
         self.manifest: dict | None = None
         self.records: list[dict] = []
+        self.backup_layout: disks.DiskInventory | None = None
+        self.backup_fsinfo: dict[str, dict] = {}
+        self.current: disks.DiskInventory | None = None
         self.verifications: list[Verification] = []
         self.esp_items: list[str] = []
         self.entries: list[dict] = []
+        self.partitions: list[disks.Partition] = []
         self._ticket: RestoreTicket | None = None
         self._generation = 0
 
@@ -503,7 +572,8 @@ class RestoreFlow:
     def load(self, backup_id: str) -> list[Verification]:
         """Verifikasi ulang backup lokal, lalu baca isinya. Backup yang gagal verifikasi tidak bisa dipakai."""
         self.backup_id, self.manifest, self.records = None, None, []
-        self.esp_items, self.entries = [], []
+        self.backup_layout, self.backup_fsinfo, self.current = None, {}, None
+        self.esp_items, self.entries, self.partitions = [], [], []
         self._changed()
         directory = Path(self.deps.backups_root) / (backup_id or "")
         if not backup_id or Path(backup_id).name != backup_id or not (directory / "manifest.json").exists():
@@ -513,8 +583,19 @@ class RestoreFlow:
         if all(v.ok for v in self.verifications):
             self.manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
             self.records = json.loads((directory / "firmware-entries.json").read_text(encoding="utf-8"))
+            self.backup_layout = disks.parse_inventory((directory / "partitions.json").read_text(encoding="utf-8"))
+            fsinfo_file = directory / "fsinfo.json"  # backup sebelum M3 tidak punya file ini
+            self.backup_fsinfo = json.loads(fsinfo_file.read_text(encoding="utf-8")) if fsinfo_file.exists() else {}
             self.backup_id = backup_id
+            self.refresh_disks()
         return self.verifications
+
+    def refresh_disks(self) -> None:
+        """Baca daftar disk sekarang (read-only), untuk menentukan partisi mana yang masih bisa dibuat ulang."""
+        try:
+            self.current = self.deps.load_inventory(ReadOnlyRunner(self.deps.inner_runner))
+        except Exception:  # pilihan partisi jadi tidak tersedia, sisanya tetap bisa
+            self.current = None
 
     def _require_backup(self) -> Path:
         if self.backup_id is None or self.manifest is None:
@@ -540,10 +621,31 @@ class RestoreFlow:
         self._require_backup()
         return [RestoreChoice(entry_label(r), describe_entry(r), unrestorable_reason(r)) for r in self.records]
 
-    def select(self, esp_items: Sequence[str], entries: Sequence[str]) -> str | None:
+    def _describe_partition(self, part: disks.Partition, short: bool = False) -> str:
+        info = self.backup_fsinfo.get(part.id) or {}
+        if short:
+            return f"{part.id} · {human_size(part.size)} · {part.type_name}" + (f" · {info['fs_type']}" if info else "")
+        content = f" · {info.get('fs_type')}" + (f" UUID {info['uuid']}" if info.get("uuid") else "") if info else ""
+        return f"{part.id} · {human_size(part.size)} · {part.type_name} · offset {part.offset:,}{content}"
+
+    def partition_choices(self) -> list[RestoreChoice]:
+        """Partisi Linux yang tercatat di backup. Hanya yang sudah tidak ada dan ruangnya masih kosong yang bisa."""
+        self._require_backup()
+        return [
+            RestoreChoice(part.guid, self._describe_partition(part, short=True),
+                          partition_restore_refusal(part, self.backup_layout, self.current))
+            for part in self.backup_layout.partitions
+            if part.category == gpt_types.LINUX
+        ]
+
+    def _find_partition(self, selector: str) -> disks.Partition | None:
+        key = (selector or "").strip().strip("{}").lower()
+        return next((p for p in self.backup_layout.partitions if key in (p.guid, p.id.lower())), None)
+
+    def select(self, esp_items: Sequence[str], entries: Sequence[str], partitions: Sequence[str] = ()) -> str | None:
         """Tetapkan yang dipulihkan. Hasilnya masalah pertama yang ditemukan (None = pilihan berlaku)."""
         self._require_backup()
-        self.esp_items, self.entries = [], []
+        self.esp_items, self.entries, self.partitions = [], [], []
         self._changed()
         chosen, problem = select_backup_entries(self.records, list(entries))
         if problem:
@@ -555,22 +657,34 @@ class RestoreFlow:
         for item in esp_items:
             if protected_esp_item(item):
                 return f"{item or '(kosong)'}: dilindungi; pulihkan Windows lewat docs/RECOVERY.md (bcdboot)"
-        if not esp_items and not chosen:
+        parts = []
+        for selector in partitions:
+            part = self._find_partition(selector)
+            if part is None:
+                return f"Partisi '{selector}' tidak ada di backup"
+            reason = partition_restore_refusal(part, self.backup_layout, self.current)
+            if reason:
+                return f"Partisi {part.id}: {reason}"
+            parts.append(part)
+        if not esp_items and not chosen and not parts:
             return "Belum ada yang dipilih"
         self.esp_items = list(dict.fromkeys(norm_path(item) for item in esp_items))
         self.entries = chosen
+        self.partitions = list({p.guid: p for p in parts}.values())
         return None
 
     def summary(self) -> str:
         return (
-            f"Akan dipulihkan dari backup {self.backup_id}: folder/file {', '.join(self.esp_items) or '-'}; "
+            f"Akan dipulihkan dari backup {self.backup_id}: "
+            f"partisi {', '.join(self._describe_partition(p) for p in self.partitions) or '-'}; "
+            f"folder/file {', '.join(self.esp_items) or '-'}; "
             f"entri {', '.join(describe_entry(r) for r in self.entries) or '-'}"
         )
 
     def authorize(self, word: str) -> RestoreTicket | None:
         """Tiket pemulihan kalau PULIHKAN diketik persis. None = tidak diketik."""
         self._require_backup()
-        if not self.esp_items and not self.entries:
+        if not self.esp_items and not self.entries and not self.partitions:
             raise FlowError("Pilih yang dipulihkan dulu")
         if not typed(word, RESTORE_WORD):
             return None
@@ -579,6 +693,7 @@ class RestoreFlow:
             _manifest_hash(self.manifest),
             tuple(self.esp_items),
             tuple(entry_label(r) for r in self.entries),
+            tuple(p.guid for p in self.partitions),
             self._generation,
         )
         return self._ticket
@@ -599,8 +714,12 @@ class RestoreFlow:
         if _manifest_hash(manifest) != ticket.manifest_hash:
             return [Verification("Backup", False, "manifest.json berubah sejak backup dipilih")]
 
-        runner, created = restore_runner(self.deps.inner_runner)
+        disk_guid = {d.number: d.guid for d in self.backup_layout.disks}
+        scripts = frozenset(partition_restore_script(p, disk_guid[p.disk_number]) for p in self.partitions)
+        runner, created = restore_runner(self.deps.inner_runner, scripts)
         results: list[Verification] = []
+        if self.partitions:
+            results += self._restore_partitions(runner, disk_guid, say)
         if self.esp_items:
             esp = self.deps.load_inventory(runner).esp()
             expected = (manifest.get("esp_partition") or {}).get("guid") or ""
@@ -620,4 +739,47 @@ class RestoreFlow:
             results.append(restore_boot_entry(runner, created, record))
         if self.entries:
             results.append(_durable("BCD ditulis ke disk", self.deps.flush_bcd))
+        return results
+
+    def _restore_partitions(self, runner: Runner, disk_guid: dict, say: Callable[[str], None]) -> list[Verification]:
+        """Buat ulang entri GPT, lalu pastikan isinya utuh: UUID filesystem sama dengan saat backup."""
+        results: list[Verification] = []
+        restored: list[tuple[disks.Partition, str]] = []  # (partisi di backup, GUID disk)
+        for part in self.partitions:
+            label = f"Pulihkan partisi {part.id}"
+            current = self.deps.load_inventory(runner)  # dicek ulang tepat sebelum dibuat
+            reason = partition_restore_refusal(part, self.backup_layout, current)
+            if reason:
+                results.append(Verification(label, False, reason))
+                continue
+            say(f"Membuat ulang partisi {part.id}…")
+            done = runner.run(powershell_args(partition_restore_script(part, disk_guid[part.disk_number])))
+            if not done.ok:
+                results.append(Verification(label, False, f"New-Partition gagal: {done.output() or done.returncode}"))
+                continue
+            after = self.deps.load_inventory(runner)
+            found = _partition_at(after, disk_guid[part.disk_number], part)
+            if found is None:
+                results.append(Verification(label, False, "Partisi tidak terlihat dengan offset/ukuran/tipe yang sama"))
+                continue
+            results.append(Verification(label, True, f"Dibuat ulang sebagai {found.id} (GUID partisi baru {found.guid})"))
+            restored.append((part, disk_guid[part.disk_number]))
+
+        if restored:
+            say("Memeriksa isi partisi (scan ulang)…")
+            report = self.deps.scan()
+            for part, guid in restored:
+                expected = (self.backup_fsinfo.get(part.id) or {}).get("uuid")
+                found = _partition_at(report.inventory, guid, part) if report.inventory else None
+                info = report.fsinfo.get(found.id) if found else None
+                label = f"Isi partisi {part.id} utuh"
+                if not expected:
+                    results.append(Verification(label, True, "UUID filesystem tidak tercatat di backup ini (backup lama); "
+                                                             f"sekarang terbaca: {info.describe() if info else 'tidak dikenali'}"))
+                elif info is not None and info.uuid == expected:
+                    results.append(Verification(label, True, f"UUID filesystem sama ({expected})"))
+                else:
+                    now = info.uuid if info else "tidak terbaca"
+                    results.append(Verification(label, False, f"UUID filesystem {now}, di backup {expected}; "
+                                                              "ruangnya mungkin sudah ditimpa"))
         return results

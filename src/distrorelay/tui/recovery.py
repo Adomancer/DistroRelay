@@ -18,7 +18,8 @@ from .common import StepScreen
 class RecoveryScreen(StepScreen):
     STEP = "Pulihkan dari backup"
     HELP = (
-        "Pilih backup (diverifikasi ulang), lalu centang folder ESP dan/atau entri boot yang mau dikembalikan. "
+        "Pilih backup (diverifikasi ulang), lalu centang partisi Linux, folder ESP, dan/atau entri boot yang mau "
+        "dikembalikan. Partisi hanya bisa dibuat ulang selama ruangnya belum dipakai. "
         "File yang sudah ada dengan isi berbeda tidak ditimpa, dan milik Windows tidak disentuh "
         "(untuk Windows pakai docs/RECOVERY.md)."
     )
@@ -37,6 +38,8 @@ class RecoveryScreen(StepScreen):
             with VerticalScroll(id="items-pane"):
                 yield Static(Text("2. Yang dipulihkan", style="bold"))
                 yield Static(id="verify")
+                yield Static(Text("Partisi Linux (entri GPT dibuat ulang dengan offset/ukuran/tipe yang sama)", style="bold"))
+                yield SelectionList[str](id="partitions")
                 yield Static(Text("Folder/file ESP", style="bold"))
                 yield SelectionList[str](id="esp-items")
                 yield Static(Text("Entri boot firmware (dibuat ulang di urutan terakhir)", style="bold"))
@@ -63,8 +66,10 @@ class RecoveryScreen(StepScreen):
         self.background(lambda: self.flow.load(backup_id), self._loaded, f"Memverifikasi backup {backup_id}…")
 
     def _loaded(self, checks) -> None:
+        partitions = self.query_one("#partitions", SelectionList)
         esp_items = self.query_one("#esp-items", SelectionList)
         entries = self.query_one("#boot-entries", SelectionList)
+        partitions.clear_options()
         esp_items.clear_options()
         entries.clear_options()
         word = self.query_one("#word", Input)
@@ -76,6 +81,8 @@ class RecoveryScreen(StepScreen):
             self.refresh_next()
             return
         self.query_one("#verify", Static).update(Text(f"Backup {self.flow.backup_id} lolos verifikasi.", style="green"))
+        for choice in self.flow.partition_choices():
+            partitions.add_option(_selection(choice))
         for choice in self.flow.esp_choices():
             esp_items.add_option(_selection(choice))
         for choice in self.flow.entry_choices():
@@ -94,21 +101,24 @@ class RecoveryScreen(StepScreen):
         if not self.busy and not self.query_one("#next", Button).disabled:
             self.next()
 
-    def _selected(self) -> tuple[list[str], list[str]]:
+    def _selected(self) -> tuple[list[str], list[str], list[str]]:
         return (
             list(self.query_one("#esp-items", SelectionList).selected),
             list(self.query_one("#boot-entries", SelectionList).selected),
+            list(self.query_one("#partitions", SelectionList).selected),
         )
 
     def refresh_next(self) -> None:
-        esp_items, entries = self._selected()
+        esp_items, entries, partitions = self._selected()
         self.set_next(
-            self.flow.backup_id is not None and bool(esp_items or entries) and bool(self.query_one("#word", Input).value)
+            self.flow.backup_id is not None
+            and bool(esp_items or entries or partitions)
+            and bool(self.query_one("#word", Input).value)
         )
 
     def next(self) -> None:
-        esp_items, entries = self._selected()
-        problem = self.flow.select(esp_items, entries)
+        esp_items, entries, partitions = self._selected()
+        problem = self.flow.select(esp_items, entries, partitions)
         if problem:
             self.set_status(problem, "bold red")
             return

@@ -239,8 +239,9 @@ def candidates_text(analysis) -> Text:
         for comp in inst.components:
             text.append(f"      {comp.ref:<28} {comp.label}\n", style="dim")
     text.append(
-        "\nPilih dengan --select <key instalasi atau ref komponen>, boleh diulang. "
-        "Contoh: distrorelay plan --select efi:fedora --select efi:arch\n"
+        "\nPilih dengan --select <key instalasi atau ref komponen>, boleh diulang. Key instalasi = semua "
+        "komponennya, termasuk partisinya. Contoh: distrorelay plan --select efi:fedora --select efi:arch "
+        "(atau hanya bagian EFI-nya: --select EFI\\fedora --select nv:0003)\n"
     )
     return text
 
@@ -255,7 +256,8 @@ def plan_text(plan) -> Text:
             text.append(f"       $ {command}\n", style="cyan")
         for detail in action.details:
             text.append(f"       {detail}\n", style="dim")
-    for label, items, style in (("Diblokir", plan.blocked, "red"), ("Peringatan", plan.warnings, "yellow")):
+    sections = (("Diblokir", plan.blocked, "red"), ("Peringatan", plan.warnings, "yellow"), ("Catatan", plan.notes, "cyan"))
+    for label, items, style in sections:
         if items:
             text.append(f"\n{label}\n", style=f"bold {style}")
             for item in items:

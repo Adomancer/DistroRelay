@@ -34,10 +34,12 @@ class DistroRelayApp(App):
     .help { padding: 0 1 1 1; color: $text-muted; }
     .body { height: 1fr; }
     #plan-pane, #items-pane { width: 1fr; padding: 0 1; }
-    #candidates { width: 1fr; }
+    #select-pane { width: 1fr; }
+    #extend-c { margin: 0 1; }
+    .typed-prompt { padding: 0 1; }
     #backup-pane { width: 42; padding: 0 1; }
     #backups { height: 1fr; }
-    #esp-items, #boot-entries { height: auto; max-height: 12; }
+    #partitions, #esp-items, #boot-entries { height: auto; max-height: 12; }
     #existing { height: auto; max-height: 10; }
     #statements, #confirmations { height: auto; }
     #nav { height: auto; padding: 0 1; }

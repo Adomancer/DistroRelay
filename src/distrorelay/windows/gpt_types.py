@@ -1,7 +1,7 @@
 """Tabel GPT partition type GUID dan kategorinya.
 
-Kategori `linux` adalah whitelist: hanya partisi dengan tipe ini yang nanti (M3) boleh dipilih
-untuk dihapus. Kategori di `PROTECTED_CATEGORIES` selalu dikunci.
+Kategori `linux` adalah whitelist: hanya partisi dengan tipe ini yang boleh dipilih untuk dihapus (M3),
+dan hanya tipe ini yang bisa dibuat ulang lewat Pulihkan. Kategori di `PROTECTED_CATEGORIES` selalu dikunci.
 """
 
 from __future__ import annotations

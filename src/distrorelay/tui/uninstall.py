@@ -244,7 +244,9 @@ class SelectScreen(StepScreen):
 
     def compose_body(self) -> ComposeResult:
         with Horizontal(classes="body"):
-            yield CheckTree(Text("Kandidat"), id="candidates")
+            with Vertical(id="select-pane"):
+                yield CheckTree(Text("Kandidat"), id="candidates")
+                yield Checkbox("Perluas C: ke ruang bekasnya (partisi tepat sesudah C:)", id="extend-c", disabled=True)
             with VerticalScroll(id="plan-pane"):
                 yield Static(id="plan")
 
@@ -266,12 +268,19 @@ class SelectScreen(StepScreen):
         self._update_plan()
 
     @on(CheckTree.Toggled)
+    @on(Checkbox.Changed, "#extend-c")
     def _toggled(self) -> None:
         self._update_plan()
 
     def _update_plan(self) -> None:
         refs = self.query_one("#candidates", CheckTree).checked_refs()
-        plan = self.flow.select(refs)
+        extend = self.query_one("#extend-c", Checkbox)
+        plan = self.flow.select(refs, extend_c=extend.value)
+        if extend.value and not plan.extend_c_possible:  # partisi sesudah C: tidak dipilih lagi
+            with extend.prevent(Checkbox.Changed):
+                extend.value = False
+            plan = self.flow.select(refs)
+        extend.disabled = not plan.extend_c_possible
         self.query_one("#plan", Static).update(
             render.plan_text(plan) if refs else Text("Belum ada yang dipilih.", style="dim")
         )
@@ -441,11 +450,23 @@ class ConfirmScreen(StepScreen):
     )
     NEXT_LABEL = "Jalankan"
 
+    def __init__(self, flow: UninstallFlow) -> None:
+        super().__init__(flow)
+        self.required = flow.required_typing()  # mis. ID partisi + pernyataan backup data
+
     def compose_body(self) -> ComposeResult:
         with VerticalScroll(classes="body"):
             yield Static(render.plan_text(self.flow.plan), id="plan")
             yield Static(id="gate")
+        for n, required in enumerate(self.required):
+            yield Static(Text(required.prompt, style="bold yellow"), classes="typed-prompt")
+            yield Input(placeholder=f"Ketik {required.word}", id=f"typed-{n}", disabled=True)
         yield Input(placeholder=f"Ketik {DELETE_WORD} untuk menjalankan", id="word", disabled=True)
+
+    def _inputs(self) -> list[Input]:
+        return [self.query_one(f"#typed-{n}", Input) for n in range(len(self.required))] + [
+            self.query_one("#word", Input)
+        ]
 
     def on_mount(self) -> None:
         self.query_one("#next", Button).variant = "error"
@@ -453,22 +474,27 @@ class ConfirmScreen(StepScreen):
 
     def _gated(self, gate) -> None:
         self.query_one("#gate", Static).update(render.gate_text(gate))
-        word = self.query_one("#word", Input)
+        inputs = self._inputs()
         if gate.ok:
-            word.disabled = False
-            word.focus()
-            self.set_status("Ini akan MENGHAPUS entri boot dan folder ESP sesuai rencana di atas.", "bold red")
+            for field in inputs:
+                field.disabled = False
+            inputs[0].focus()
+            what = "entri boot, folder ESP, dan partisi" if self.required else "entri boot dan folder ESP"
+            self.set_status(f"Ini akan MENGHAPUS {what} sesuai rencana di atas.", "bold red")
         else:
             self.set_status("Gerbang belum lolos: kembali ke langkah sebelumnya dan perbaiki.", "bold red")
         self.refresh_next()
 
-    @on(Input.Changed, "#word")
+    @on(Input.Changed)
     def _typed(self) -> None:
         self.refresh_next()
 
-    @on(Input.Submitted, "#word")
-    def _submitted(self) -> None:
-        if not self.busy:
+    @on(Input.Submitted)
+    def _submitted(self, event: Input.Submitted) -> None:
+        inputs = self._inputs()
+        if event.input is not inputs[-1]:
+            inputs[inputs.index(event.input) + 1].focus()  # Enter = isian berikutnya
+        elif not self.busy:
             self.next()
 
     def refresh_next(self) -> None:
@@ -479,7 +505,12 @@ class ConfirmScreen(StepScreen):
         gate = self.flow.gate_result
         if gate is None or not gate.ok:
             return
-        ticket = self.flow.authorize(self.query_one("#word", Input).value)
+        typed_words = {r.key: self.query_one(f"#typed-{n}", Input).value for n, r in enumerate(self.required)}
+        problems = self.flow.typing_problems(typed_words)
+        if problems:
+            self.set_status("Belum cocok: " + "; ".join(problems) + ". Tidak ada yang diubah.", "bold red")
+            return
+        ticket = self.flow.authorize(self.query_one("#word", Input).value, typed_words)
         if ticket is None:
             self.set_status(f"Ketik {DELETE_WORD} persis (huruf besar). Tidak ada yang diubah.", "bold red")
             return

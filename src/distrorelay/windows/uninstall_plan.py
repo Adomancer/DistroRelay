@@ -5,17 +5,21 @@ Urutan dibuat supaya laptop tetap bisa boot ke Windows di setiap titik kalau pro
 2. File fallback EFI\\Boot\\bootx64.efi dikembalikan ke milik Windows (selagi folder distro masih ada)
 3. Entri boot dihapus
 4. Folder/file di ESP dihapus
-Hapus partisi baru tersedia di M3.
+5. Partisi Linux dihapus (M3), paling akhir karena paling sulit dibatalkan
+6. (Opsional, hanya kalau dipilih dan bersebelahan) C: diperluas ke ruang bekasnya
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from ..format import human_size
+from . import gpt_types
 from .bootentries import BootEntry
-from .bootrefs import VERDICT_IN_USE, VERDICT_UNSURE, Analysis, Component, Installation
+from .bootrefs import DISPOSABLE_ROLES, VERDICT_IN_USE, VERDICT_UNSURE, Analysis, Component, Installation, partition_role
+from .disks import DiskInventory, Partition
+from .fsprobe import FsInfo
 
 SELECTABLE_KINDS = ("linux", "unattached")
 _NEVER_TOUCH = ("efi\\microsoft", "efi\\boot")
@@ -23,7 +27,8 @@ _NEVER_TOUCH = ("efi\\microsoft", "efi\\boot")
 
 @dataclass
 class PlannedAction:
-    kind: str  # "set-windows-first" | "restore-fallback" | "delete-boot-entry" | "delete-esp-item"
+    # "set-windows-first" | "restore-fallback" | "delete-boot-entry" | "delete-esp-item" | "delete-partition" | "extend-c"
+    kind: str
     title: str
     commands: list[str]
     details: list[str] = field(default_factory=list)
@@ -37,6 +42,26 @@ class UninstallPlan:
     actions: list[PlannedAction] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    extend_c_possible: bool = False  # partisi tepat sesudah C: ikut dihapus, jadi C: bisa diperluas kalau dipilih
+
+
+def partition_refusal(part: Partition | None, inventory: DiskInventory) -> str | None:
+    """Kenapa partisi ini tidak boleh dihapus (None = boleh). Dicek lagi sesaat sebelum dihapus."""
+    if part is None:
+        return "partisi tidak ditemukan di inventaris disk"
+    if part.category != gpt_types.LINUX:
+        return f"tipe {part.type_name} bukan tipe partisi Linux yang diizinkan"
+    if part.drive_letter or part.mount_points:
+        return "punya drive letter / mount point (sedang dipakai Windows)"
+    if part.is_boot or part.is_system:
+        return "berflag boot/system"
+    disk = inventory.disk(part.disk_number)
+    if disk is None or disk.partition_style.upper() != "GPT":
+        return "bukan disk GPT"
+    if not part.guid or not disk.guid:
+        return "GUID partisi/disk tidak terbaca, jadi partisinya tidak bisa dikenali ulang dengan pasti"
+    return None
 
 
 def selectable(analysis: Analysis) -> list[tuple[Installation, Component]]:
@@ -67,8 +92,17 @@ def expand_selection(analysis: Analysis, selectors: Sequence[str]) -> tuple[list
     return list(dict.fromkeys(refs)), unknown
 
 
-def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequence[str]) -> UninstallPlan:
-    plan = UninstallPlan(selected=list(refs))
+def build_plan(
+    analysis: Analysis,
+    boot_entries: Sequence[BootEntry],
+    refs: Sequence[str],
+    *,
+    inventory: DiskInventory | None = None,
+    fsinfo: Mapping[str, FsInfo] | None = None,
+    extend_c: bool = False,
+) -> UninstallPlan:
+    plan = UninstallPlan(selected=list(refs) + (["extend:c"] if extend_c else []))
+    fsinfo = fsinfo or {}
     allowed = {comp.ref.lower(): (inst, comp) for inst, comp in selectable(analysis)}
     owners = {comp.ref.lower(): inst for inst in analysis.installations for comp in inst.components}
 
@@ -82,8 +116,13 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
             continue
         inst, comp = allowed[key]
         if comp.kind == "partition":
-            plan.blocked.append(f"{ref}: hapus partisi baru tersedia di M3")
-            continue
+            if inventory is None:
+                plan.blocked.append(f"{ref}: inventaris disk tidak tersedia (scan butuh Administrator)")
+                continue
+            refusal = partition_refusal(next((p for p in inventory.partitions if p.id.lower() == key), None), inventory)
+            if refusal:
+                plan.blocked.append(f"{ref}: {refusal}")
+                continue
         if comp.kind in ("esp-folder", "esp-file") and any(
             key == p or key.startswith(p + "\\") for p in _NEVER_TOUCH
         ):
@@ -98,6 +137,8 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
             plan.warnings.append(f"{inst.name} dinilai '{inst.verdict}': baca alasannya dulu sebelum lanjut")
 
     if not chosen:
+        if extend_c:
+            plan.blocked.append("extend:c: perluas C: hanya bisa bersama penghapusan partisi yang tepat sesudah C:")
         return plan
 
     managers = [e for e in boot_entries if e.is_windows_boot_manager]
@@ -204,6 +245,11 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
             )
         )
 
+    for _, comp in chosen:
+        if comp.kind == "partition":
+            plan.actions.append(_delete_partition_action(inventory, fsinfo, comp.ref))
+    _plan_extend_c(plan, inventory, extend_c)
+
     deleted_entries = {a.ref.lower() for a in plan.actions if a.kind == "delete-boot-entry"}
     for entry in boot_entries:
         path = (entry.path or "").lower().lstrip("\\")
@@ -214,3 +260,96 @@ def build_plan(analysis: Analysis, boot_entries: Sequence[BootEntry], refs: Sequ
                 f"Entri '{entry.description}' ({entry.label}) menjalankan file yang akan dihapus, tapi entrinya tidak dipilih"
             )
     return plan
+
+
+def _delete_partition_action(inventory: DiskInventory, fsinfo: Mapping[str, FsInfo], ref: str) -> PlannedAction:
+    part = next(p for p in inventory.partitions if p.id.lower() == ref.lower())
+    disk = inventory.disk(part.disk_number)
+    info = fsinfo.get(part.id)
+    role = partition_role(part, fsinfo)
+    needs_statement = role not in DISPOSABLE_ROLES
+    content = info.describe() if info else "filesystem tidak terbaca / tidak dikenali"
+    return PlannedAction(
+        "delete-partition",
+        f"Hapus partisi {part.id} ({human_size(part.size)}, {part.type_name})",
+        [f"Remove-Partition -DiskNumber {part.disk_number} -PartitionNumber {part.number} -Confirm:$false"],
+        [
+            f"Disk {part.disk_number}: {disk.model} ({disk.bus_type}), GUID disk {disk.guid}",
+            f"Offset {part.offset:,} byte · ukuran {part.size:,} byte · tipe GPT {part.gpt_type}",
+            f"GUID partisi {part.guid}",
+            f"Isi: {content} · peran: {role}",
+            "Nomor disk & partisi diambil ulang dari GUID sesaat sebelum dihapus, setelah layout disk dicek ulang",
+            "Hanya entri tabel GPT yang dihapus; datanya belum ditimpa, jadi bisa dipulihkan (Pulihkan) "
+            "selama ruangnya belum dipakai",
+            "Wajib ketik ID partisi" + (" dan pernyataan bahwa datanya sudah kamu backup" if needs_statement else ""),
+        ],
+        part.id,
+        {
+            "id": part.id,
+            "guid": part.guid,
+            "disk_guid": disk.guid,
+            "disk_number": part.disk_number,
+            "number": part.number,
+            "offset": part.offset,
+            "size": part.size,
+            "gpt_type": part.gpt_type,
+            "type_name": part.type_name,
+            "role": role,
+            "fs_type": info.fs_type if info else None,
+            "fs_uuid": info.uuid if info else None,
+            "needs_data_statement": needs_statement,
+        },
+    )
+
+
+def _plan_extend_c(plan: UninstallPlan, inventory: DiskInventory | None, extend_c: bool) -> None:
+    """Perluas C: hanya kalau dipilih sendiri DAN partisi tepat sesudah C: ikut dihapus."""
+    deleted = {a.data["guid"]: a.data for a in plan.actions if a.kind == "delete-partition"}
+    if not deleted or inventory is None:
+        if extend_c:
+            plan.blocked.append("extend:c: perluas C: hanya bisa bersama penghapusan partisi yang tepat sesudah C:")
+        return
+    windows = inventory.windows_partition()
+    following = inventory.next_partition(windows) if windows else None
+    adjacent = following is not None and following.guid in deleted
+    freed = ", ".join(d["id"] for d in deleted.values())
+    if not adjacent:
+        between = f" (ada {following.id} {following.type_name} di antaranya)" if following is not None else ""
+        message = f"Ruang bekas {freed} tidak bersebelahan dengan C:{between}, jadi dibiarkan unallocated"
+        if extend_c:
+            plan.blocked.append(f"extend:c: {message}")
+        else:
+            plan.notes.append(message)
+        return
+    plan.extend_c_possible = True
+    if not extend_c:
+        plan.notes.append(
+            f"Ruang bekas {freed} bersebelahan dengan C:. Default dibiarkan unallocated; C: bisa diperluas kalau "
+            "kamu memilih 'Perluas C:' (setelah itu partisinya tidak bisa dipulihkan lagi)"
+        )
+        return
+    disk = inventory.disk(windows.disk_number)
+    plan.actions.append(
+        PlannedAction(
+            "extend-c",
+            "Perluas C: ke ruang bekas partisi Linux",
+            [
+                "Get-PartitionSupportedSize -DriveLetter C  (ukuran maksimum)",
+                "Resize-Partition -DriveLetter C -Size <ukuran maksimum>",
+            ],
+            [
+                f"C: = {windows.id}, sekarang {human_size(windows.size)}",
+                "GUID C: dicek ulang sebelum diperluas; BitLocker tidak perlu dimatikan untuk memperluas volume",
+                "Setelah C: diperluas, partisi yang dihapus TIDAK bisa dipulihkan lagi lewat Pulihkan",
+            ],
+            windows.id,
+            {
+                "guid": windows.guid,
+                "disk_guid": disk.guid if disk else None,
+                "offset": windows.offset,
+                "size": windows.size,
+                "freed": sorted(deleted),
+            },
+        )
+    )
+    plan.warnings.append("C: akan diperluas: partisi yang dihapus tidak bisa dipulihkan lagi sesudahnya")

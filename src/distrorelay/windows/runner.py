@@ -243,11 +243,15 @@ class AllowListRunner:
     inner: Runner
     extra_cmdlets: frozenset[str] = frozenset()
     rules: tuple[Callable[[Sequence[str]], bool], ...] = ()
+    # Script PowerShell yang diizinkan persis apa adanya (mis. hapus satu partisi tertentu dari rencana).
+    # Cmdlet pengubahnya tidak masuk extra_cmdlets, jadi script lain yang memakainya tetap ditolak.
+    scripts: frozenset[str] = frozenset()
 
     def run(self, args: Sequence[str], *, timeout: float = 120) -> CommandResult:
         script = decode_powershell(args)
         if script is not None:
-            check_powershell(script, ALLOWED_CMDLETS | self.extra_cmdlets)
+            if script not in self.scripts:
+                check_powershell(script, ALLOWED_CMDLETS | self.extra_cmdlets)
         else:
             try:
                 check_read_only(args)

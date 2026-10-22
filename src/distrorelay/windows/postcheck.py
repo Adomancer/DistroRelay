@@ -95,8 +95,29 @@ def post_check(plan: UninstallPlan, manifest: dict, before: ScanReport, after: S
         detail = f"Berubah/hilang: {changed[:3]}; baru: {added[:3]}"
     checks.append(Verification("File ESP lain tidak tersentuh", untouched, detail))
 
-    layout_same = before.inventory is not None and after.inventory is not None and (
-        before.inventory.fingerprint() == after.inventory.fingerprint()
-    )
-    checks.append(Verification("Layout disk tidak berubah", layout_same, "Ya" if layout_same else "Berubah!"))
+    checks.extend(_layout_checks(plan, before, after))
+    return checks
+
+
+def _layout_checks(plan: UninstallPlan, before: ScanReport, after: ScanReport) -> list[Verification]:
+    """Partisi yang dihapus hilang, C: bertambah kalau diperluas, dan semua partisi lain sama persis."""
+    deleted = {a.data["guid"]: a.data for a in plan.actions if a.kind == "delete-partition"}
+    extended = {a.data["guid"]: a.data for a in plan.actions if a.kind == "extend-c"}
+    if before.inventory is None or after.inventory is None:
+        return [Verification("Layout disk sesuai rencana", False, "Daftar disk tidak terbaca")]
+    checks = []
+    if deleted:
+        still = [d["id"] for guid, d in deleted.items() if after.inventory.by_guid(guid) is not None]
+        checks.append(Verification("Partisi yang dihapus sudah tidak ada", not still,
+                                   "Ya" if not still else f"Masih ada: {', '.join(still)}"))
+    for guid, data in extended.items():
+        grown = after.inventory.by_guid(guid)
+        ok = grown is not None and grown.size > data["size"]
+        checks.append(Verification("C: diperluas", ok, f"{data['size']:,} → {grown.size:,} byte" if ok else "Tidak bertambah"))
+    skip = set(deleted) | set(extended)
+    expected = {item for item in before.inventory.layout() if item[1] not in skip}
+    current = {item for item in after.inventory.layout() if item[1] not in extended}
+    same = current == expected
+    title = "Layout disk lain tidak berubah" if skip else "Layout disk tidak berubah"
+    checks.append(Verification(title, same, "Ya" if same else "Berubah!"))
     return checks
