@@ -9,7 +9,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from .disks import Partition
 from .runner import Runner
@@ -136,32 +136,63 @@ def volume_guid_of(root: str) -> str | None:
     return name[start + 1 : end].lower() if start != -1 and end != -1 else None
 
 
+def used_drive_letters() -> list[str]:
+    if sys.platform != "win32":
+        return []
+    import ctypes
+
+    used = ctypes.windll.kernel32.GetLogicalDrives()
+    return [chr(ord("A") + n) for n in range(26) if used & (1 << n)]
+
+
+def find_mounted_esp(esp: Partition, letters: Iterable[str] | None = None, guid_of=None) -> str | None:
+    """Huruf drive tempat ESP ini sudah ter-mount, mis. sisa `mountvol /S` dari proses yang dimatikan paksa.
+
+    Mount lewat `mountvol /S` tidak terlihat di Get-Partition (DriveLetter/AccessPaths kosong), jadi dicari lewat
+    GUID volume di setiap huruf drive yang dipakai.
+    """
+    if not esp.guid:
+        return None
+    guid_of = guid_of or volume_guid_of
+    for letter in letters if letters is not None else used_drive_letters():
+        if guid_of(f"{letter}:\\") == esp.guid:
+            return letter
+    return None
+
+
 @dataclass
 class MountedEsp:
     root: Path
     letter: str
     temporary: bool
+    adopted: bool = False  # sudah ter-mount sebelumnya (sisa sesi terputus); tetap di-unmount di akhir
 
 
 @contextmanager
-def mounted_esp(runner: Runner, esp: Partition) -> Iterator[MountedEsp]:
+def mounted_esp(runner: Runner, esp: Partition, *, find_existing=find_mounted_esp) -> Iterator[MountedEsp]:
     """Mount ESP ke huruf drive kosong (`mountvol X: /S`), lalu pasti di-unmount (`/D`)."""
     if esp.drive_letter:
         yield MountedEsp(Path(f"{esp.drive_letter}:\\"), esp.drive_letter, temporary=False)
         return
 
-    letter = free_drive_letter()
-    result = runner.run(["mountvol", f"{letter}:", "/S"])
-    if not result.ok:
-        raise EspError(f"mountvol {letter}: /S gagal: {result.output() or result.returncode}")
-    log.info("ESP di-mount sementara ke %s:", letter)
+    existing = find_existing(esp)
+    if existing:
+        # ESP hanya bisa di-mount sekali; `mountvol /S` kedua gagal dengan "The parameter is incorrect".
+        log.warning("ESP sudah ter-mount di %s: (kemungkinan sisa sesi yang terputus); dipakai lalu dilepas", existing)
+        letter, adopted = existing, True
+    else:
+        letter, adopted = free_drive_letter(), False
+        result = runner.run(["mountvol", f"{letter}:", "/S"])
+        if not result.ok:
+            raise EspError(f"mountvol {letter}: /S gagal: {result.output() or result.returncode}")
+        log.info("ESP di-mount sementara ke %s:", letter)
     try:
         mounted_guid = volume_guid_of(f"{letter}:\\")
         if mounted_guid and esp.guid and mounted_guid != esp.guid:
             raise EspError(
                 f"Volume yang ter-mount ({mounted_guid}) bukan ESP yang diharapkan ({esp.guid}); scan ESP dibatalkan"
             )
-        yield MountedEsp(Path(f"{letter}:\\"), letter, temporary=True)
+        yield MountedEsp(Path(f"{letter}:\\"), letter, temporary=True, adopted=adopted)
     finally:
         undo = runner.run(["mountvol", f"{letter}:", "/D"])
         if undo.ok:

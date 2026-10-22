@@ -347,8 +347,34 @@ def execute_plan(
     fail_after: str | None = None,
     stop: StopSignal | None = None,
 ) -> ExecutionResult:
-    say = progress or (lambda message: None)
     stop = stop or StopSignal()
+    try:
+        return _execute_steps(
+            plan, runner=runner, esp_root=esp_root, manifest=manifest, journal=journal,
+            suspend_bitlocker=suspend_bitlocker, signature_of=signature_of, read_nvram=read_nvram,
+            flush_bcd=flush_bcd, flush_volume=flush_volume, progress=progress, fail_after=fail_after, stop=stop,
+        )
+    finally:
+        stop.mark_done()  # penangan "jendela ditutup" menunggu titik ini
+
+
+def _execute_steps(
+    plan: UninstallPlan,
+    *,
+    runner: Runner,
+    esp_root: Path,
+    manifest: dict,
+    journal: Journal,
+    suspend_bitlocker: bool,
+    signature_of: Callable[[Runner, Path], Signature],
+    read_nvram: Callable[[], NvramSnapshot] | None,
+    flush_bcd: Callable[[], None],
+    flush_volume: Callable[[Path], None],
+    progress: Callable[[str], None] | None,
+    fail_after: str | None,
+    stop: StopSignal,
+) -> ExecutionResult:
+    say = progress or (lambda message: None)
     actions = list(plan.actions)
     if suspend_bitlocker:
         actions.insert(

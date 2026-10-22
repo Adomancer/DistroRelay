@@ -304,6 +304,14 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
         return 1
 
     console.print("\nIni akan MENGHAPUS entri boot dan folder ESP sesuai rencana di atas.", style="bold red")
+    if not sys.stdin.isatty():
+        # Uji VM 2026-10-22: PowerShell mematikan program di dalam pipeline saat Ctrl+C, di tengah langkah.
+        console.print(
+            "Peringatan: input datang dari pipe/script. Di PowerShell, Ctrl+C pada pipeline mematikan proses ini "
+            "di tengah langkah, jadi tidak bisa berhenti dengan rapi. Sebaiknya jalankan perintah ini langsung "
+            "di jendela PowerShell/CMD.",
+            style="yellow",
+        )
     ticket = flow.authorize(_ask_word(f"Ketik {DELETE_WORD} untuk menjalankan, atau Enter untuk batal: "))
     if ticket is None:
         console.print("Dibatalkan. Tidak ada yang diubah.")
@@ -375,8 +383,11 @@ def _run_restore_command(args: argparse.Namespace) -> int:
     if problem:
         console.print(problem, style="red", markup=False)
         return 1
-    console.print(f"Akan dipulihkan: folder/file {args.esp_item or '-'}, entri {[r['description'] for r in chosen] or '-'}",
-                  markup=False)
+    console.print(
+        f"Akan dipulihkan: folder/file {', '.join(args.esp_item) or '-'}; "
+        f"entri {', '.join(describe_entry(r) for r in chosen) or '-'}",
+        markup=False,
+    )
     from .windows.workflow import RESTORE_WORD, typed
 
     if not typed(_ask_word(f"Ketik {RESTORE_WORD} untuk menjalankan: "), RESTORE_WORD):

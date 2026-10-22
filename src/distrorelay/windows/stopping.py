@@ -32,6 +32,7 @@ class StopSignal:
         self._requested = threading.Event()
         self._idle = threading.Event()  # tidak ada langkah yang sedang jalan
         self._idle.set()
+        self._done = threading.Event()  # eksekusi sudah berhenti dan journal sudah ditutup
         self.reason: str | None = None
 
     def request(self, reason: str = "Dihentikan pengguna") -> None:
@@ -51,6 +52,12 @@ class StopSignal:
     def wait_idle(self, timeout: float) -> bool:
         return self._idle.wait(timeout)
 
+    def mark_done(self) -> None:
+        self._done.set()
+
+    def wait_done(self, timeout: float) -> bool:
+        return self._done.wait(timeout)
+
 
 def handle_console_event(stop: StopSignal, event: int, notify=None, grace: float = CLOSE_GRACE_SECONDS) -> bool:
     """True = sinyal ditangani di sini (proses tidak dipotong Ctrl+C / KeyboardInterrupt)."""
@@ -61,7 +68,9 @@ def handle_console_event(stop: StopSignal, event: int, notify=None, grace: float
         return True
     if event in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
         stop.request("Jendela ditutup / Windows logoff atau shutdown")
-        stop.wait_idle(grace)  # Windows memaksa mati begitu penangan ini kembali
+        # Windows memaksa mati begitu penangan ini kembali, jadi tunggu sampai langkah yang sedang jalan selesai
+        # DAN journal mencatat berhentinya (bukan hanya langkahnya selesai).
+        stop.wait_done(grace)
         return True
     return False
 

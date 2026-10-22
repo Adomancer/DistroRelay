@@ -202,10 +202,16 @@ def test_console_events_request_a_clean_stop():
 
     stop = StopSignal()
     stop.step_started()
-    threading.Timer(0.2, stop.step_finished).start()
+    threading.Timer(0.1, stop.step_finished).start()
+    threading.Timer(0.3, stop.mark_done).start()  # journal ditutup sesudah langkahnya selesai
     began = time.monotonic()
     assert handle_console_event(stop, CTRL_CLOSE_EVENT, grace=3)
-    assert stop.requested() and 0.15 < time.monotonic() - began < 2.5  # menunggu langkahnya selesai dulu
+    assert stop.requested() and 0.25 < time.monotonic() - began < 2.5  # menunggu sampai eksekusi benar-benar berhenti
+
+    stop = StopSignal()  # eksekusi yang tidak berhenti juga tidak menahan Windows selamanya
+    began = time.monotonic()
+    assert handle_console_event(stop, CTRL_CLOSE_EVENT, grace=0.3)
+    assert time.monotonic() - began < 1.5
 
 
 def test_machine_detection_parsing():
@@ -259,6 +265,23 @@ def test_cli_refuses_lowercase_confirmation(tmp_path, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     assert _run_uninstall_command(argparse.Namespace(backup=backup.backup_id, select=SELECT), flow=flow) == 1
     assert FEDORA in bcd.entries
+
+
+def test_esp_left_mounted_by_a_killed_run_is_found_reused_and_released():
+    # Uji VM 7b: proses yang dimatikan paksa meninggalkan ESP ter-mount di Y:, tidak terlihat di Get-Partition.
+    from distrorelay.windows.esp import find_mounted_esp, mounted_esp
+    from distrorelay.windows.runner import FakeRunner
+
+    esp = next(p for p in laptop_inventory().partitions if p.category == "esp")
+    guids = {"C:\\": "aaaa", "E:\\": "bbbb", "Y:\\": esp.guid}
+    assert find_mounted_esp(esp, ["C", "E", "Y"], guid_of=guids.get) == "Y"
+    assert find_mounted_esp(esp, ["C", "E"], guid_of=guids.get) is None
+
+    fake = FakeRunner()
+    fake.add("mountvol Y: /D")
+    with mounted_esp(fake, esp, find_existing=lambda part: "Y") as mounted:
+        assert mounted.adopted and mounted.letter == "Y"
+    assert [list(c) for c in fake.calls] == [["mountvol", "Y:", "/D"]]  # tidak ada /S kedua yang pasti gagal
 
 
 FORBIDDEN_IN_TUI = {"execute", "runner", "flush", "restore"}
