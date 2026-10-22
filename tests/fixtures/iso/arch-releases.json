@@ -1,0 +1,90 @@
+{
+ "version": 1,
+ "releases": [
+  {
+   "release_date": "2026-10-01",
+   "version": "2026.10.01",
+   "kernel_version": "7.2.7",
+   "created": "2026-10-01T14:53:36.091Z",
+   "md5_sum": null,
+   "sha1_sum": null,
+   "sha256_sum": "684ded26c63240ff4a41e8c25ee84ea6da233f557364821f13d12c2b0a9059a5",
+   "b2_sum": "dcccf63640e6d4194d1a741788deff6c0ccd25d5f44f84feb4bfd505088fc90d6964fd06317943c2234365dd1edfd3bd17b7981a0fa776412ccf3d5764760545",
+   "wkd_email": "pierre@archlinux.org",
+   "pgp_fingerprint": "3E80CA1A8B89F69CBA57D98A76A5EF9054449A5C",
+   "available": true,
+   "iso_url": "/iso/2026.10.01/archlinux-2026.10.01-x86_64.iso",
+   "magnet_uri": "magnet:?xt=urn:btih:9b521219bc48550140a666f74a29048ed78e933b&dn=archlinux-2026.10.01-x86_64.iso",
+   "torrent_url": "/releng/releases/2026.10.01/torrent/",
+   "info": "",
+   "torrent": {
+    "comment": "Arch Linux 2026.10.01 <https://archlinux.org>",
+    "created_by": "mktorrent 1.1",
+    "creation_date": "2026-10-01T14:51:45Z",
+    "announce": null,
+    "file_name": "archlinux-2026.10.01-x86_64.iso",
+    "file_length": 1640497152,
+    "piece_count": 3129.0,
+    "piece_length": 524288,
+    "info_hash": "9b521219bc48550140a666f74a29048ed78e933b"
+   }
+  },
+  {
+   "release_date": "2026-09-01",
+   "version": "2026.09.01",
+   "kernel_version": "7.2.2",
+   "created": "2026-09-01T17:18:09.227Z",
+   "md5_sum": null,
+   "sha1_sum": null,
+   "sha256_sum": "be8458032f8105e60ee2a3067f950b6e3c007ee51b38dac50e8b48e765561c91",
+   "b2_sum": "3800353d61304a72ba6fb74182529adbe8d03e25290a70028a7c87f9332543cbb83a620a134b4b38fbecf1e3fbb95e54ce436e243040166218f58802a31891f9",
+   "wkd_email": "pierre@archlinux.org",
+   "pgp_fingerprint": "3E80CA1A8B89F69CBA57D98A76A5EF9054449A5C",
+   "available": true,
+   "iso_url": "/iso/2026.09.01/archlinux-2026.09.01-x86_64.iso",
+   "magnet_uri": "magnet:?xt=urn:btih:f45add9d1a5185d8588df7dd6cd89993dd0174fa&dn=archlinux-2026.09.01-x86_64.iso",
+   "torrent_url": "/releng/releases/2026.09.01/torrent/",
+   "info": "",
+   "torrent": {
+    "comment": "Arch Linux 2026.09.01 <https://archlinux.org>",
+    "created_by": "mktorrent 1.1",
+    "creation_date": "2026-09-01T17:12:25Z",
+    "announce": null,
+    "file_name": "archlinux-2026.09.01-x86_64.iso",
+    "file_length": 1608286208,
+    "piece_count": 3068.0,
+    "piece_length": 524288,
+    "info_hash": "f45add9d1a5185d8588df7dd6cd89993dd0174fa"
+   }
+  },
+  {
+   "release_date": "2026-08-01",
+   "version": "2026.08.01",
+   "kernel_version": "7.1.5",
+   "created": "2026-08-01T14:18:31.314Z",
+   "md5_sum": null,
+   "sha1_sum": null,
+   "sha256_sum": "4e82dced1c4fd3e498b22a853f8db2a4d262d32b97e7e07d97390d9e425ffe5e",
+   "b2_sum": "f1937fa1bd97175c3b3c658c83849a6e8f482d0431c37622cd228c7733211da43c8c4df16eddd7e842823806117929150aa899d481da0865144b40a206b72937",
+   "wkd_email": "pierre@archlinux.org",
+   "pgp_fingerprint": "3E80CA1A8B89F69CBA57D98A76A5EF9054449A5C",
+   "available": true,
+   "iso_url": "/iso/2026.08.01/archlinux-2026.08.01-x86_64.iso",
+   "magnet_uri": "magnet:?xt=urn:btih:ed8507e22addc40fd6fb4f1677bf27fd75967f70&dn=archlinux-2026.08.01-x86_64.iso",
+   "torrent_url": "/releng/releases/2026.08.01/torrent/",
+   "info": "",
+   "torrent": {
+    "comment": "Arch Linux 2026.08.01 <https://archlinux.org>",
+    "created_by": "mktorrent 1.1",
+    "creation_date": "2026-08-01T14:12:40Z",
+    "announce": null,
+    "file_name": "archlinux-2026.08.01-x86_64.iso",
+    "file_length": 1597014016,
+    "piece_count": 3047.0,
+    "piece_length": 524288,
+    "info_hash": "ed8507e22addc40fd6fb4f1677bf27fd75967f70"
+   }
+  }
+ ],
+ "latest_version": "2026.10.01"
+}

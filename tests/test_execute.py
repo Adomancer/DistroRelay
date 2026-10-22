@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from distrohop.windows.backup import backup_runner, create_backup
-from distrohop.windows.bootentries import BOOTMGR_ID
-from distrohop.windows.execute import (
+from distrorelay.windows.backup import backup_runner, create_backup
+from distrorelay.windows.bootentries import BOOTMGR_ID
+from distrorelay.windows.execute import (
     ExecutionError,
     SimulatedCrash,
     check_gate,
@@ -15,16 +15,19 @@ from distrohop.windows.execute import (
     execution_runner,
     safe_esp_path,
 )
-from distrohop.windows.journal import Journal, incomplete_sessions, read_journal, summarize
-from distrohop.windows.postcheck import post_check
-from distrohop.windows.preflight import MANUAL, OK, Check, PreflightResult
-from distrohop.windows.restore import restore_boot_entry, restore_esp_items, restore_runner
-from distrohop.windows.runner import ReadOnlyViolation
-from distrohop.windows.scanner import run_scan
-from distrohop.windows.uninstall_plan import build_plan, expand_selection
+from distrorelay.windows.journal import Journal, incomplete_sessions, read_journal, summarize
+from distrorelay.windows.postcheck import post_check
+from distrorelay.windows.preflight import MANUAL, OK, Check, PreflightResult
+from distrorelay.windows.restore import restore_boot_entry, restore_esp_items, restore_runner
+from distrorelay.windows.runner import ReadOnlyViolation
+from distrorelay.windows.scanner import run_scan
+from distrorelay.windows.uninstall_plan import build_plan, expand_selection
 from helpers import BOOTMGFW, SHIM, fake_mount, laptop_world
 
-SELECT = ["efi:fedora", "efi:arch", "grubdir:grub"]
+# Tiga instalasi sisa di laptop simulasi. Memilih instalasi = semua komponennya, termasuk partisi disk0-p5 (M3).
+INSTALLATIONS = ["efi:fedora", "efi:arch", "grubdir:grub"]
+# Komponen EFI-nya saja (entri + folder), untuk test alur M2 tanpa hapus partisi.
+SELECT = ["nv:0003", "EFI\\fedora", "nv:0004", "EFI\\Arch", "grub"]
 FEDORA = "{8bd7fdcc-13ca-11f1-84fe-806e6f6e6963}"
 ARCH = "{fb3dba71-dd51-11f0-8498-806e6f6e6963}"
 
@@ -50,7 +53,7 @@ def world(tmp_path, select=SELECT, local_only=False, setup=None):
     report = run_scan(deps())
     refs, unknown = expand_selection(report.analysis, select)
     assert unknown == []
-    plan = build_plan(report.analysis, report.boot_entries, refs)
+    plan = build_plan(report.analysis, report.boot_entries, refs, inventory=report.inventory, fsinfo=report.fsinfo)
     backup = create_backup(
         report,
         backup_runner(bcd, root=tmp_path / "local"),
@@ -89,7 +92,7 @@ def test_full_uninstall_then_post_check(tmp_path):
     bcd, esp_root, deps, report, plan, backup = world(tmp_path)
     gate = gate_for(tmp_path, plan, report, backup)
     assert gate.ok, gate.problems
-    assert gate.notes == ["Dilewati (M3): disk0-p5: hapus partisi baru tersedia di M3"]
+    assert gate.notes == []
 
     result, journal = run(tmp_path, bcd, esp_root, plan, gate.manifest)
     assert result.completed, result.stopped
@@ -284,12 +287,12 @@ def test_entry_seen_only_in_bcdedit_is_blocked(tmp_path):
         bcd.add(orphan, "Fedora", "\\EFI\\fedora\\shimx64.efi", in_order=False)
         bcd.bcd_only.add(orphan)
 
-    bcd, esp_root, deps, report, plan, backup = world(tmp_path, setup=setup)
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path, select=INSTALLATIONS, setup=setup)
     assert orphan not in {a.data.get("bcd_id") for a in plan.actions}
     assert FEDORA in {a.data.get("bcd_id") for a in plan.actions}  # Fedora asli tetap dipasangkan dengan benar
     assert any("hanya terlihat di bcdedit" in b for b in plan.blocked)
     gate = gate_for(tmp_path, plan, report, backup)
-    assert not gate.ok  # blokir selain M3 = rencana tidak boleh jalan
+    assert not gate.ok  # ada yang diblokir = rencana tidak boleh jalan
 
 
 def test_entry_repaired_differently_at_execution_stops_before_delete(tmp_path):
@@ -336,7 +339,7 @@ def test_every_boot_change_is_written_to_disk_before_the_next_step(tmp_path):
 
 
 def test_failed_flush_stops_execution(tmp_path):
-    from distrohop.windows.flush import FlushError
+    from distrorelay.windows.flush import FlushError
 
     bcd, esp_root, deps, report, plan, backup = world(tmp_path)
     gate = gate_for(tmp_path, plan, report, backup)
@@ -348,6 +351,56 @@ def test_failed_flush_stops_execution(tmp_path):
     assert not result.completed
     assert result.steps[-1].kind == "set-windows-first" and "Hive BCD gagal" in result.stopped
     assert FEDORA in bcd.entries and ARCH in bcd.entries
+
+
+def test_restore_selects_duplicate_names_by_boot_number():
+    from distrorelay.windows.restore import select_backup_entries
+
+    records = [
+        {"description": "Arch", "path": "\\EFI\\Arch\\grubx64.efi", "nvram_number": 8, "bcd_id": "{a}"},
+        {"description": "Fedora", "path": "\\EFI\\fedora\\shimx64.efi", "nvram_number": 7, "bcd_id": "{f7}"},
+        {"description": "Fedora", "path": "\\EFI\\fedora\\shimx64.efi", "nvram_number": 5, "bcd_id": "{f5}"},
+    ]
+    chosen, problem = select_backup_entries(records, ["Fedora"])
+    assert chosen == [] and "Ada 2 entri bernama 'Fedora'" in problem
+    assert "Boot0007" in problem and "Boot0005" in problem and "--boot-entry Boot0007" in problem
+
+    chosen, problem = select_backup_entries(records, ["arch", "boot0005", "{F7}"])
+    assert problem is None and [r["bcd_id"] for r in chosen] == ["{a}", "{f5}", "{f7}"]
+    assert select_backup_entries(records, ["Ubuntu"]) == ([], "Entri 'Ubuntu' tidak ada di backup")
+
+
+def test_interrupted_session_is_resolved_only_by_a_later_green_session(tmp_path):
+    from distrorelay.windows.journal import sessions
+
+    directory = tmp_path / "journal"
+    crashed = Journal.start(directory, "20261022-040607", {"backup": "b1"})
+    crashed.record(3, "delete-boot-entry", "nv:0008", "started")
+
+    failed = Journal.start(directory, "20261022-041000", {"backup": "b2"})
+    failed.finish(True, "Semua langkah selesai")
+    failed.post_check(False, ["Entri lain tetap ada"])
+    # Post-check gagal juga meninggalkan keadaan setengah jadi, dan tidak menuntaskan sesi sebelumnya.
+    assert [s.path.stem for s in incomplete_sessions(directory)] == ["20261022-040607", "20261022-041000"]
+
+    green = Journal.start(directory, "20261022-043352", {"backup": "b3"})
+    green.finish(True, "Semua langkah selesai")
+    green.post_check(True, [])
+    assert incomplete_sessions(directory) == []
+    first = sessions(directory)[0]
+    assert not first.finished and first.resolved_by == "20261022-043352" and first.backup == "b1"
+
+
+def test_post_check_flags_fallback_left_identical_to_a_deleted_bootloader(tmp_path):
+    bcd, esp_root, deps, report, plan, backup = world(tmp_path)
+    gate = gate_for(tmp_path, plan, report, backup)
+    plan.actions = [a for a in plan.actions if a.kind != "restore-fallback"]  # seolah langkah ini terlewat
+
+    result, _ = run(tmp_path, bcd, esp_root, plan, gate.manifest)
+    assert result.completed, result.stopped
+    checks = {c.name: c for c in post_check(plan, gate.manifest, report, run_scan(deps()))}
+    fallback = checks["Fallback milik Windows"]
+    assert not fallback.ok and "efi\\fedora\\shimx64.efi" in fallback.message.lower()
 
 
 def test_execution_refuses_to_delete_without_nvram(tmp_path):

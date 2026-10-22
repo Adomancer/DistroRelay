@@ -1,10 +1,10 @@
 import copy
 import json
 
-from distrohop.windows import disks
-from distrohop.windows.backup import backup_runner
-from distrohop.windows.preflight import FAIL, MANUAL, OK, run_preflight
-from distrohop.windows.scanner import run_scan
+from distrorelay.windows import disks
+from distrorelay.windows.backup import backup_runner
+from distrorelay.windows.preflight import FAIL, MANUAL, OK, run_preflight
+from distrorelay.windows.scanner import run_scan
 from helpers import BITLOCKER_OFF, BITLOCKER_ON, fake_mount, scan_deps, write_tree
 
 VALID = json.dumps(
@@ -73,7 +73,7 @@ def test_ventoy_iso_is_detected_by_mounting_it_read_only(tmp_path):
     }
     assert [(m.drive, m.kind) for m in result.media] == [("E", "iso")]
     assert result.media[0].source.endswith("Win11_24H2_English_x64.iso")
-    from distrohop.windows.runner import command_key
+    from distrorelay.windows.runner import command_key
 
     names = [command_key(c) for c in fake.calls]
     assert names.count("ps:iso-mount") == 1 and names.count("ps:iso-dismount") == 1  # ISO Fedora tidak di-mount
@@ -86,7 +86,7 @@ def test_plain_installer_usb_needs_no_mount(tmp_path):
     write_tree(roots["E"], {"sources\\install.esd": b"esd"})
     result = preflight()
     assert [(m.drive, m.kind, m.source) for m in result.media] == [("E", "installer", "E:\\sources\\install.esd")]
-    from distrohop.windows.runner import command_key
+    from distrorelay.windows.runner import command_key
 
     assert "ps:iso-mount" not in [command_key(c) for c in fake.calls]
 

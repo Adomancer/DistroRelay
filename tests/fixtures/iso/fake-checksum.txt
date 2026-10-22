@@ -1,0 +1,2 @@
+# fake-1.0-x86_64.iso: 86016 bytes
+SHA256 (fake-1.0-x86_64.iso) = fbb3c36c9378daa533807ee69120d52fc57862ea6493fe6fdb3d5a30a5ff9bf5

@@ -2,18 +2,20 @@
 
 import dataclasses
 
-from distrohop.windows.uninstall_plan import build_plan, expand_selection
-from test_laptop_real import analyze_laptop, real_entries
+from distrorelay.windows.uninstall_plan import build_plan, expand_selection
+from helpers import laptop_inventory
+from test_laptop_real import FSINFO, analyze_laptop, real_entries
 
 FEDORA_BCD = "{8bd7fdcc-13ca-11f1-84fe-806e6f6e6963}"
 ARCH_BCD = "{fb3dba71-dd51-11f0-8498-806e6f6e6963}"
 
 
-def plan_for(tmp_path, *selectors, entries=None):
-    analysis, _ = analyze_laptop(tmp_path)
+def plan_for(tmp_path, *selectors, entries=None, inventory=None, extend_c=False):
+    inventory = inventory or laptop_inventory()
+    analysis, _ = analyze_laptop(tmp_path, inventory=inventory)
     entries = entries if entries is not None else real_entries()[0]
     refs, unknown = expand_selection(analysis, list(selectors))
-    return build_plan(analysis, entries, refs), unknown
+    return build_plan(analysis, entries, refs, inventory=inventory, fsinfo=FSINFO, extend_c=extend_c), unknown
 
 
 def test_all_three_leftovers_in_safe_order(tmp_path):
@@ -27,13 +29,20 @@ def test_all_three_leftovers_in_safe_order(tmp_path):
         ("delete-esp-item", "EFI\\fedora"),
         ("delete-esp-item", "EFI\\Arch"),
         ("delete-esp-item", "grub"),
+        ("delete-partition", "disk0-p5"),  # paling akhir: paling sulit dibatalkan
     ]
     assert plan.actions[0].commands == ["bcdedit /set {fwbootmgr} displayorder {bootmgr} /addfirst"]
     assert plan.actions[2].commands == [f"bcdedit /delete {FEDORA_BCD}"]
     assert plan.actions[3].commands == [f"bcdedit /delete {ARCH_BCD}"]
     assert any("Get-AuthenticodeSignature" in c for c in plan.actions[1].commands)
-    assert plan.blocked == ["disk0-p5: hapus partisi baru tersedia di M3"]
+    assert plan.blocked == []
     assert plan.warnings == []
+    # Laptop asli: C:, lalu Recovery, baru partisi Linux -> tidak bersebelahan, ruangnya dibiarkan unallocated.
+    assert plan.notes == [
+        "Ruang bekas disk0-p5 tidak bersebelahan dengan C: (ada disk0-p4 Windows Recovery di antaranya), "
+        "jadi dibiarkan unallocated"
+    ]
+    assert not plan.extend_c_possible
 
 
 def test_arch_alone_does_not_touch_fedoras_fallback(tmp_path):

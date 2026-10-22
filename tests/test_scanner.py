@@ -5,10 +5,10 @@ import json
 
 from rich.console import Console
 
-from distrohop import render
-from distrohop.tui.app import DistroHopApp
-from distrohop.windows.bootrefs import VERDICT_LEFTOVER
-from distrohop.windows.scanner import report_to_json, run_scan, save_raw
+from distrorelay import render
+from distrorelay.tui.app import DistroRelayApp
+from distrorelay.windows.bootrefs import VERDICT_LEFTOVER
+from distrorelay.windows.scanner import report_to_json, run_scan, save_raw
 from helpers import fixture_text
 from helpers import scan_deps as make_deps
 
@@ -91,7 +91,7 @@ def test_tui_shows_report(tmp_path):
     report = run_scan(deps)
 
     async def scenario():
-        app = DistroHopApp(scan=lambda progress=None: report)
+        app = DistroRelayApp(scan=lambda progress=None: report)
         async with app.run_test() as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()

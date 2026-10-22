@@ -1,0 +1,186 @@
+"""Dotfiles: dikemas jadi tar.gz saat backup (M5), dipulihkan saat setup (M4).
+
+Arsip berisi path relatif terhadap home. Pemulihan aman untuk arsip yang tidak dipercaya penuh: path absolut, '..',
+symlink, hardlink, dan file perangkat ditolak, dan tidak ada yang ditulis di luar home. File yang sudah ada dengan
+isi berbeda di-rename dulu, bukan ditimpa. File sensitif (~/.ssh, ~/.gnupg) dipulihkan dengan permission ketat.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import os
+import stat
+import tarfile
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
+
+MAX_FILE_SIZE = 100 * 1024 * 1024  # file lebih besar dari ini (cache, image) tidak dibackup
+
+
+@dataclass
+class RestoreReport:
+    restored: list[str] = field(default_factory=list)
+    unchanged: list[str] = field(default_factory=list)
+    renamed: list[tuple[str, str]] = field(default_factory=list)  # (path, nama cadangannya)
+    skipped: list[tuple[str, str]] = field(default_factory=list)  # (path, alasan)
+
+    def summary(self) -> str:
+        parts = [f"{len(self.restored)} file dipulihkan"]
+        if self.unchanged:
+            parts.append(f"{len(self.unchanged)} sudah sama")
+        if self.renamed:
+            parts.append(f"{len(self.renamed)} file lama di-rename ke *.distrorelay-*.bak")
+        if self.skipped:
+            parts.append(f"{len(self.skipped)} dilewati")
+        return ", ".join(parts)
+
+
+def safe_member_path(name: str) -> str | None:
+    """Path relatif yang aman, atau None. 'a/./b' -> 'a/b'; absolut, '..', kosong -> None."""
+    path = PurePosixPath(name)
+    if path.is_absolute() or "\\" in name or "\x00" in name:
+        return None
+    parts = [p for p in path.parts if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return None
+    return "/".join(parts)
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        return _digest(path.read_bytes())
+    except OSError:
+        return None
+
+
+def _private_mode(rel: str, is_dir: bool) -> int:
+    """Permission ketat untuk file sensitif: folder 700, file 600, kunci publik 644 (seperti ssh-keygen)."""
+    if is_dir:
+        return 0o700
+    return 0o644 if rel.endswith(".pub") else 0o600
+
+
+def restore(source, home: Path, stamp: str, *, private: bool = False) -> RestoreReport:
+    """`source` = path arsip tar.gz, atau isinya (bytes, mis. hasil gpg --decrypt yang tidak pernah ditulis ke disk)."""
+    report = RestoreReport()
+    home = Path(home)
+    opened = tarfile.open(fileobj=io.BytesIO(source), mode="r:gz") if isinstance(source, bytes) else tarfile.open(source, "r:gz")
+    with opened as tar:
+        for member in tar.getmembers():
+            rel = safe_member_path(member.name)
+            if rel is None:
+                report.skipped.append((member.name, "path di luar home"))
+                continue
+            target = home / rel
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                if private:
+                    os.chmod(target, _private_mode(rel, True))
+                continue
+            if not member.isfile():
+                kind = "symlink" if member.issym() or member.islnk() else "bukan file biasa"
+                report.skipped.append((rel, f"{kind}, tidak dipulihkan"))
+                continue
+            member_file = tar.extractfile(member)
+            data = member_file.read() if member_file is not None else b""
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                report.skipped.append((rel, "di home sudah ada symlink/folder dengan nama ini"))
+                continue
+            if target.exists():
+                if _file_digest(target) == _digest(data):
+                    report.unchanged.append(rel)
+                    continue
+                backup = target.with_name(f"{target.name}.distrorelay-{stamp}.bak")
+                os.replace(target, backup)
+                report.renamed.append((rel, backup.name))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if private:  # isi rahasia tidak pernah ada di disk dengan permission longgar, walau sesaat
+                descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+                os.chmod(target, _private_mode(rel, False))
+            else:
+                with open(target, "wb") as handle:
+                    handle.write(data)
+                os.chmod(target, member.mode & 0o777)  # tanpa setuid/setgid/sticky
+            report.restored.append(rel)
+    return report
+
+
+# --- Backup (M5) ------------------------------------------------------------------------
+
+
+@dataclass
+class ArchiveReport:
+    files: list[str] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)  # (path, alasan)
+    total_size: int = 0
+
+
+def write_archive(
+    target: BinaryIO,
+    home: Path,
+    paths: list[str],
+    max_file_size: int = MAX_FILE_SIZE,
+    exclude: list[str] = (),
+) -> ArchiveReport:
+    """Kemas path di home (relatif, tanpa '~/') ke tar.gz. Symlink dan file khusus tidak ikut (dicatat).
+
+    `exclude` = path sensitif: tidak pernah masuk arsip ini walau ada di dalam folder yang dibackup, karena arsip ini
+    tidak dienkripsi (mis. dotfiles ~/.config + sensitif ~/.config/rahasia).
+    """
+    report = ArchiveReport()
+    home = Path(home)
+
+    def excluded(rel: str) -> bool:
+        return any(rel == e or rel.startswith(e + "/") for e in exclude)
+
+    def add_file(path: Path, rel: str, tar: tarfile.TarFile) -> None:
+        if excluded(rel):
+            report.skipped.append((rel, "sensitif, hanya dibackup terenkripsi"))
+            return
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode):
+            report.skipped.append((rel, "symlink"))
+        elif not stat.S_ISREG(info.st_mode):
+            report.skipped.append((rel, "bukan file biasa"))
+        elif info.st_size > max_file_size:
+            report.skipped.append((rel, f"lebih dari {max_file_size // (1024 * 1024)} MB"))
+        else:
+            tar.add(str(path), arcname=rel, recursive=False)
+            report.files.append(rel)
+            report.total_size += info.st_size
+
+    with tarfile.open(fileobj=target, mode="w:gz") as tar:
+        for rel in paths:
+            path = home / rel
+            if not os.path.lexists(path):
+                report.skipped.append((rel, "tidak ada"))
+            elif path.is_symlink() or not path.is_dir():
+                add_file(path, rel, tar)
+            elif excluded(rel):
+                report.skipped.append((rel, "sensitif, hanya dibackup terenkripsi"))
+            else:
+                tar.add(str(path), arcname=rel, recursive=False)
+                for root, dirs, names in os.walk(path):  # followlinks=False: symlink folder tidak diikuti
+                    root_path = Path(root)
+                    for name in sorted(dirs):
+                        sub = root_path / name
+                        sub_rel = sub.relative_to(home).as_posix()
+                        if sub.is_symlink():
+                            report.skipped.append((sub_rel, "symlink"))
+                        elif excluded(sub_rel):
+                            report.skipped.append((sub_rel, "sensitif, hanya dibackup terenkripsi"))
+                        else:
+                            tar.add(str(sub), arcname=sub_rel, recursive=False)
+                    dirs[:] = [d for d in dirs if not excluded((root_path / d).relative_to(home).as_posix())]
+                    for name in sorted(names):
+                        file_path = root_path / name
+                        add_file(file_path, file_path.relative_to(home).as_posix(), tar)
+    return report

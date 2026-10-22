@@ -1,7 +1,7 @@
 import json
 
-from distrohop.windows import gpt_types
-from distrohop.windows.disks import parse_inventory, redact_serials
+from distrorelay.windows import gpt_types
+from distrorelay.windows.disks import parse_inventory, redact_serials
 from helpers import P5_GUID, fixture_text, laptop_inventory
 
 

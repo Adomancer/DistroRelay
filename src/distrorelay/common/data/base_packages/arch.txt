@@ -1,0 +1,35 @@
+# Paket bawaan Arch (dan turunannya) yang tidak dibawa saat backup: dipasang installer, bukan pilihanmu.
+# Pola gaya shell (fnmatch). Sisanya tetap lewat checklist kurasi.
+base
+linux
+linux-lts
+linux-zen
+linux-hardened
+linux-firmware*
+linux-headers
+linux-*-headers
+*-ucode
+grub
+efibootmgr
+os-prober
+mkinitcpio*
+dracut
+sof-firmware
+networkmanager
+iwd
+dhcpcd
+netctl
+sudo
+btrfs-progs
+dosfstools
+e2fsprogs
+xfsprogs
+lvm2
+cryptsetup
+mdadm
+archinstall
+endeavouros-*
+eos-*
+manjaro-*
+cachyos-*
+garuda-*

@@ -1,8 +1,8 @@
 import pytest
 
-from distrohop.windows.bitlocker import BITLOCKER_SCRIPT
-from distrohop.windows.disks import DISKS_SCRIPT
-from distrohop.windows.runner import (
+from distrorelay.windows.bitlocker import BITLOCKER_SCRIPT
+from distrorelay.windows.disks import DISKS_SCRIPT
+from distrorelay.windows.runner import (
     FakeRunner,
     ReadOnlyRunner,
     ReadOnlyViolation,
@@ -14,7 +14,7 @@ from distrohop.windows.runner import (
 
 
 def test_powershell_args_round_trip():
-    script = "# distrohop:contoh\nGet-Disk | ConvertTo-Json"
+    script = "# distrorelay:contoh\nGet-Disk | ConvertTo-Json"
     args = powershell_args(script)
     assert decode_powershell(args) == script
     assert command_key(args) == "ps:contoh"
@@ -51,7 +51,7 @@ def test_read_only_allows_scan_commands(args):
         ["mountvol", "Z:", "\\\\?\\Volume{x}\\"],
         ["diskpart", "/s", "script.txt"],
         ["manage-bde", "-off", "C:"],
-        powershell_args("# distrohop:jahat\nGet-Partition | Remove-Partition -Confirm:$false"),
+        powershell_args("# distrorelay:jahat\nGet-Partition | Remove-Partition -Confirm:$false"),
         powershell_args("get-partition | remove-partition"),
         powershell_args("Suspend-BitLocker -MountPoint C:"),
         [],
@@ -64,7 +64,7 @@ def test_read_only_blocks_anything_that_can_change_the_system(args):
 
 def test_read_only_allows_reading_an_exported_store_and_signatures():
     check_read_only(["bcdedit", "/store", "C:\\backup\\bcd-store.bak", "/enum", "all"])
-    from distrohop.windows.signature import signature_script
+    from distrorelay.windows.signature import signature_script
 
     check_read_only(powershell_args(signature_script("Z:\\EFI\\Pop_OS-1234\\file-with-hyphen.efi")))
 
@@ -80,15 +80,15 @@ def test_read_only_allows_reading_an_exported_store_and_signatures():
     ],
 )
 def test_powershell_aliases_call_operator_and_writable_mounts_are_blocked(script):
-    from distrohop.windows.preflight import M2A_CMDLETS
-    from distrohop.windows.runner import ALLOWED_CMDLETS, check_powershell
+    from distrorelay.windows.preflight import M2A_CMDLETS
+    from distrorelay.windows.runner import ALLOWED_CMDLETS, check_powershell
 
     with pytest.raises(ReadOnlyViolation):
         check_powershell(script, ALLOWED_CMDLETS | M2A_CMDLETS)
 
 
 def test_allow_list_runner_only_allows_export_into_backup_folder(tmp_path):
-    from distrohop.windows.backup import backup_runner
+    from distrorelay.windows.backup import backup_runner
 
     fake = FakeRunner()
     fake.add("bcdedit /export *")

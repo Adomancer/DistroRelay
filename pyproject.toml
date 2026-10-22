@@ -3,8 +3,8 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "distrohop"
-version = "0.1.0"
+name = "distrorelay"
+version = "0.7.0"
 description = "Toolkit distro-hopping untuk dual-boot Windows + Linux"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,12 +12,17 @@ dependencies = ["textual>=8.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+build = ["pyinstaller>=6.11"]
 
 [project.scripts]
-distrohop = "distrohop.__main__:main"
+distrorelay = "distrorelay.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+distrorelay = ["common/data/*.toml", "common/data/base_packages/*.txt", "windows/iso/keys/*.gpg"]
+distrorelay_linux = ["bootstrap.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
