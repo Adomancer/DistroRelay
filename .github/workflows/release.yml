@@ -1,0 +1,46 @@
+# Build distrorelay.exe di mesin Windows bersih. Push tag v* = test + build + selftest, lalu rilis DRAFT berisi .exe
+# dan SHA256-nya (dipublikasikan manual dari halaman Releases). Jalankan manual (workflow_dispatch) = hanya artifact.
+name: Rilis exe
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Pasang dependensi
+        run: python -m pip install -e ".[dev,build]"
+      - name: Test
+        run: python -m pytest -q
+      - name: Build exe
+        run: python -m PyInstaller packaging/distrorelay.spec --noconfirm
+      - name: Selftest exe
+        run: dist\distrorelay.exe selftest
+      - name: SHA256
+        run: |
+          $hash = (Get-FileHash dist\distrorelay.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash *distrorelay.exe" | Out-File dist\distrorelay.exe.sha256 -Encoding ascii
+          Get-Content dist\distrorelay.exe.sha256
+      - uses: actions/upload-artifact@v6
+        with:
+          name: distrorelay-exe
+          path: |
+            dist/distrorelay.exe
+            dist/distrorelay.exe.sha256
+      - name: Rilis draft
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}" dist/distrorelay.exe dist/distrorelay.exe.sha256
+          --draft --prerelease --title "DistroRelay ${{ github.ref_name }}" --notes-file docs/release-notes.md

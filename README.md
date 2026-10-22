@@ -4,7 +4,7 @@ Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → unin
 
 Masalah awalnya: setelah partisi Linux di-wipe, GRUB masih muncul saat boot karena folder bootloader di EFI System Partition (ESP), entri boot di NVRAM, dan partisi pendukung seperti `/boot` tidak ikut terhapus.
 
-## Status: M0 + M1 + M2 + M3 (CLI + wizard TUI), M4 + M5 (Linux kit + backup), M6 (ISO manager + shrink C:)
+## Status: M0 + M1 + M2 + M3 (CLI + wizard TUI), M4 + M5 (Linux kit + backup), M6 (ISO manager + shrink C:), M7 (`.exe`)
 
 Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` (juga wizard uninstall di TUI) menghapus entri boot, folder ESP, dan partisi Linux yang dipilih.**
 Jalankan **di VM dulu** (lihat [tests/vm/SCENARIOS.md](tests/vm/SCENARIOS.md)). Di laptop asli, `uninstall` menolak jalan
@@ -22,7 +22,7 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M4 | Profil (TOML) + peta nama paket per distro, export Linux kit ke USB/NTFS, `setup` di distro baru | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
 | M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import`, aturan backup bertingkat (a) | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
 | M6 | ISO manager (cek versi terbaru, unduh yang bisa dilanjutkan, verifikasi GPG + SHA256, salin ke Ventoy), shrink C: | ✅ kode + test (tanda tangan asli distro dicek dengan gpgv); unduh ISO penuh, salin ke Ventoy, dan shrink di VM belum |
-| M7 | Rilis `.exe` (PyInstaller) | belum |
+| M7 | Rilis `.exe` (PyInstaller, tanpa Python), `selftest`, workflow GitHub untuk rilis draft | ✅ `.exe` dibuild + `selftest` lolos di laptop ini; workflow GitHub belum pernah dijalankan |
 
 ## Apa yang dilakukan scan
 
@@ -41,6 +41,13 @@ Pengaman yang dipasang:
 - Di laporan JSON dan output mentah (`--raw-dir`), nomor seri disk serta identitas perangkat di NVRAM (nomor seri SSD, EUI NVMe, MAC) disamarkan. Nama file di ESP tetap tercantum apa adanya, termasuk file pabrikan yang namanya bisa memuat nomor seri laptop, jadi periksa dulu sebelum laporan dibagikan ke publik.
 
 ## Cara menjalankan
+
+**Tanpa Python:** unduh `distrorelay.exe` dari halaman Releases, cocokkan SHA256-nya dengan `distrorelay.exe.sha256`
+(`Get-FileHash .\distrorelay.exe`), lalu jalankan dari PowerShell, misalnya `.\distrorelay.exe selftest`. Semua perintah
+di bawah sama, cukup ganti `.venv\Scripts\python.exe -m distrorelay` dengan `.\distrorelay.exe`. `.exe` belum
+ditandatangani, jadi SmartScreen bisa memperingatkan.
+
+**Dari source:**
 
 ```powershell
 python -m venv .venv
@@ -204,13 +211,34 @@ Sama seperti *Shrink Volume* di Disk Management (`Resize-Partition`). Ditolak ka
 GUID/offset/ukuran C: tepat sebelum mengecilkan, dicatat di journal, lalu dicek ulang. Ruang kosongnya muncul tepat
 sesudah C: dan bisa langsung dipakai installer Linux.
 
+## Rilis `.exe` (M7)
+
+```powershell
+.venv\Scripts\python.exe -m pip install -e ".[dev,build]"
+.venv\Scripts\python.exe -m PyInstaller packaging\distrorelay.spec --noconfirm   # -> dist\distrorelay.exe
+dist\distrorelay.exe selftest     # data bawaan, Linux kit (diekspor ke folder sementara), keyring ISO, TUI headless
+```
+
+- Satu file, aplikasi konsol. Tidak memakai `--uac-admin`: manifest admin membuat setiap perintah (juga `iso`,
+  `profile`, `kit` yang tidak butuh admin) membuka jendela UAC baru yang langsung tertutup. Elevasi tetap lewat
+  DistroRelay sendiri, hanya untuk perintah yang butuh admin.
+- Kode Linux kit ikut sebagai file `.py` biasa (bukan hanya bytecode), karena `kit export` menyalin file sumbernya.
+  [`tests/test_release.py`](tests/test_release.py) memastikan spec membawa semua file yang dibaca dari disk.
+- Rilis GitHub: push tag (mis. `git tag v0.7.0 && git push origin v0.7.0`).
+  [Workflow](.github/workflows/release.yml) menjalankan test, build, dan `selftest` di Windows bersih, lalu membuat rilis
+  **draft** berisi `.exe` + `.sha256` dengan catatan dari [`docs/release-notes.md`](docs/release-notes.md). Rilis baru
+  terlihat publik setelah kamu menekan *Publish* di halaman Releases.
+
 ## Struktur
 
 ```
+packaging/                spec PyInstaller + launcher untuk distrorelay.exe
+.github/workflows/        build .exe + rilis draft saat push tag v*
 src/distrorelay_linux/    Linux kit (stdlib, Python 3.8+): cli, distro, pm, provision, dotfiles, backup, kit, bootstrap.sh
 src/distrorelay/common/   profil + peta paket, dipakai Windows dan Linux kit
 src/distrorelay/
 ├─ __main__.py            CLI & elevasi admin
+├─ selftest.py            cek isi paket/.exe tanpa mengubah sistem
 ├─ render.py              tampilan bersama untuk CLI dan TUI
 ├─ tui/                   dashboard + wizard uninstall, Pulihkan, journal (Textual; hanya lewat workflow)
 └─ windows/

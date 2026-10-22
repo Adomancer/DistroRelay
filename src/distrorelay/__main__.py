@@ -116,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         "shrink-c", help="kecilkan C: untuk ruang distro baru (MENGUBAH partisi, coba di VM dulu)"
     )
     shrink.add_argument("--size", type=float, metavar="GB", help="berapa GB dibebaskan; tanpa ini hanya menampilkan info")
+    commands.add_parser("selftest", help="cek isi paket/.exe: data bawaan, Linux kit, keyring ISO, TUI (tidak mengubah sistem)")
     return parser
 
 
@@ -123,7 +124,7 @@ ISO_DISTROS = ("fedora", "arch", "ubuntu", "mint")
 
 
 # Perintah yang hanya membaca file DistroRelay sendiri tidak perlu hak Administrator.
-_NO_ADMIN_COMMANDS = {"verify-backup", "journal", "profile", "kit", "iso"}
+_NO_ADMIN_COMMANDS = {"verify-backup", "journal", "profile", "kit", "iso", "selftest"}
 
 
 def _ask(prompt: str) -> str:
@@ -722,6 +723,22 @@ def _run_iso_command(args: argparse.Namespace, tools=None, volumes=None) -> int:
     return 0
 
 
+def _run_selftest_command() -> int:
+    from rich.console import Console
+    from rich.text import Text
+
+    from . import selftest
+
+    console = Console()
+    with console.status("Selftest…"):
+        checks = selftest.run()
+    for check in checks:
+        line = Text("[ok]    " if check.ok else "[GAGAL] ", style="green" if check.ok else "bold red")
+        line.append(f"{check.name}: {check.message}")
+        console.print(line)
+    return 0 if all(c.ok for c in checks) else 1
+
+
 def _run_shrink_command(args: argparse.Namespace, inner=None, journal_root: Path | None = None) -> int:
     from rich.console import Console
 
@@ -824,6 +841,8 @@ def main(argv: list[str] | None = None) -> int:
             code = _run_iso_command(args)
         elif args.command == "shrink-c":
             code = _run_shrink_command(args)
+        elif args.command == "selftest":
+            code = _run_selftest_command()
         else:
             from .tui.app import run_tui
 

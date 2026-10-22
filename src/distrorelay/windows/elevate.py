@@ -19,8 +19,16 @@ def is_admin() -> bool:
         return False
 
 
+def relaunch_command(args: Sequence[str]) -> tuple[str, str]:
+    """(program, parameter) untuk menjalankan ulang DistroRelay: `distrorelay.exe <args>` kalau dari .exe
+    (PyInstaller), selain itu `python -m distrorelay <args>`."""
+    if getattr(sys, "frozen", False):
+        return sys.executable, subprocess.list2cmdline(list(args))
+    return sys.executable, subprocess.list2cmdline(["-m", "distrorelay", *args])
+
+
 def relaunch_as_admin(args: Sequence[str]) -> bool:
-    """Jalankan ulang `python -m distrorelay <args>` lewat UAC. True kalau jendela baru berhasil dibuka."""
+    """Jalankan ulang DistroRelay dengan `args` lewat UAC. True kalau jendela baru berhasil dibuka."""
     import ctypes
     from ctypes import wintypes
 
@@ -34,7 +42,7 @@ def relaunch_as_admin(args: Sequence[str]) -> bool:
         ctypes.c_int,
     ]
     shell_execute.restype = ctypes.c_void_p
-    params = subprocess.list2cmdline(["-m", "distrorelay", *args])
-    result = shell_execute(None, "runas", sys.executable, params, os.getcwd(), 1)
+    program, params = relaunch_command(args)
+    result = shell_execute(None, "runas", program, params, os.getcwd(), 1)
     # Nilai > 32 berarti sukses; 5 berarti user menolak UAC.
     return (result or 0) > 32

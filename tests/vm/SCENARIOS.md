@@ -168,6 +168,21 @@ jadi opsi Perluas C: tidak muncul dan ruangnya dibiarkan unallocated untuk distr
 | S-3 | `shrink-c --size <lebih dari maksimal>` | `[GAGAL]` dengan alasan (batas Windows / sisa kosong 20 GB), tidak ada yang berubah | [ ] |
 | S-4 | Reboot VM | Windows boot normal, `chkdsk C:` (read-only) bersih | [ ] |
 
+## Gate M7: distrorelay.exe
+
+**Tanpa VM** (kecuali E-6). Build sekali di folder repo: `.venv\Scripts\python.exe -m pip install -e ".[dev,build]"`
+lalu `.venv\Scripts\python.exe -m PyInstaller packaging\distrorelay.spec --noconfirm`:
+
+| # | Langkah | Yang dicek | Lolos |
+|---|---|---|---|
+| E-1 | Salin `dist\distrorelay.exe` ke folder lain (mis. Downloads), PowerShell biasa (bukan admin): `.\distrorelay.exe --version` lalu `.\distrorelay.exe selftest` | `DistroRelay 0.7.0`; semua `[ok]`, termasuk "exe (PyInstaller)", "Linux kit … lolos verifikasi", dan "TUI … tampil" | [ ] |
+| E-2 | Klik dua kali `distrorelay.exe` di Explorer | Dialog UAC → jendela baru berisi dashboard TUI + hasil scan; `q` keluar | [ ] |
+| E-3 | PowerShell biasa: `.\distrorelay.exe scan` | UAC → jendela admin baru menampilkan hasil scan + "Tekan Enter untuk menutup" | [ ] |
+| E-4 | `.\distrorelay.exe iso check`, `.\distrorelay.exe profile show`, `.\distrorelay.exe journal` | Jalan langsung di jendela yang sama, tanpa UAC | [ ] |
+| E-5 | `.\distrorelay.exe kit export --ntfs`, lalu di WSL `cd /mnt/c/DistroRelay/kit && sh bootstrap.sh info` | Kit dari `.exe` lolos cek hash di Linux (sama seperti K-2) | [ ] |
+| E-6 | Di VM/PC **tanpa Python**: salin `.exe`, jalankan `selftest` dan `scan` | Sama seperti E-1/E-3, tanpa error DLL/modul | [ ] |
+| E-7 | GitHub: `git tag v0.7.0` → `git push origin v0.7.0` | Actions "Rilis exe" hijau; rilis **draft** berisi `distrorelay.exe` + `.sha256`; hash file unduhan sama; `selftest` lolos. Publish manual kalau sudah yakin | [ ] |
+
 ## Khusus M2a (sudah bisa dicoba sekarang)
 
 - [ ] `distrorelay backup --usb <huruf>` di VM: semua verifikasi `[ok]`, folder `esp\` di USB lengkap
