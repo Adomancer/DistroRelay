@@ -344,67 +344,35 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
     return 0
 
 
-def _run_restore_command(args: argparse.Namespace) -> int:
-    import json
-
+def _run_restore_command(args: argparse.Namespace, flow=None) -> int:
     from rich.console import Console
 
     from . import render
-    from .windows import disks, esp, flush
-    from .windows.backup import Verification, backups_root, verify_backup_dir
-    from .windows.restore import (
-        describe_entry,
-        restore_boot_entry,
-        restore_esp_items,
-        restore_runner,
-        select_backup_entries,
-    )
-
-    def _durable(label, action) -> Verification:
-        try:
-            action()
-        except flush.FlushError as exc:
-            return Verification(label, False, str(exc))
-        return Verification(label, True, "Ya")
-    from .windows.runner import SubprocessRunner
+    from .windows.workflow import RESTORE_WORD, RestoreFlow, default_deps
 
     console = Console()
-    backup = backups_root() / args.backup
-    failed = [v for v in verify_backup_dir(backup) if not v.ok]
+    flow = flow or RestoreFlow(default_deps())
+    with console.status("Memverifikasi backup…"):
+        failed = [v for v in flow.load(args.backup) if not v.ok]
     if failed:
         console.print(render.verifications_text("Backup tidak valid", failed))
         return 1
-    records = json.loads((backup / "firmware-entries.json").read_text(encoding="utf-8"))
     if not args.esp_item and not args.boot_entry:
         console.print("Pilih yang mau dipulihkan dengan --esp-item PATH dan/atau --boot-entry NAMA atau Boot####.")
-        console.print("Entri di backup: " + ", ".join(describe_entry(r) for r in records), markup=False)
+        console.print("Folder/file di backup: " + ", ".join(c.key for c in flow.esp_choices()), markup=False)
+        console.print("Entri di backup: " + ", ".join(c.label for c in flow.entry_choices()), markup=False)
         return 1
-    chosen, problem = select_backup_entries(records, args.boot_entry)
+    problem = flow.select(args.esp_item, args.boot_entry)
     if problem:
         console.print(problem, style="red", markup=False)
         return 1
-    console.print(
-        f"Akan dipulihkan: folder/file {', '.join(args.esp_item) or '-'}; "
-        f"entri {', '.join(describe_entry(r) for r in chosen) or '-'}",
-        markup=False,
-    )
-    from .windows.workflow import RESTORE_WORD, typed
-
-    if not typed(_ask_word(f"Ketik {RESTORE_WORD} untuk menjalankan: "), RESTORE_WORD):
+    console.print(flow.summary(), markup=False)
+    ticket = flow.authorize(_ask_word(f"Ketik {RESTORE_WORD} untuk menjalankan: "))
+    if ticket is None:
         console.print("Dibatalkan.")
         return 1
-
-    runner, created = restore_runner(SubprocessRunner())
-    inventory, _ = disks.load_inventory(runner)
-    results = []
-    if args.esp_item:
-        with esp.mounted_esp(runner, inventory.esp()) as mounted:
-            results += restore_esp_items(backup, args.esp_item, mounted.root)
-            results.append(_durable("Folder/file ESP ditulis ke disk", lambda: flush.flush_volume(mounted.root)))
-    for record in chosen:
-        results.append(restore_boot_entry(runner, created, record))
-    if chosen:
-        results.append(_durable("BCD ditulis ke disk", flush.flush_bcd))
+    with console.status("Memulihkan…") as status:
+        results = flow.run(ticket, progress=lambda m: status.update(m))
     console.print(render.verifications_text("Pemulihan", results))
     return 0 if all(r.ok for r in results) else 1
 

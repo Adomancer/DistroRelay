@@ -81,6 +81,26 @@ $env:DISTRORELAY_DEV = "1"; $env:DISTRORELAY_FAIL_AFTER = "3"
 .venv\Scripts\python.exe -m distrorelay restore --backup <ID> --esp-item EFI\fedora --boot-entry Fedora
 ```
 
+## Gate M2c fase B: lewat wizard TUI
+
+Wizard memakai `UninstallFlow`/`RestoreFlow` yang sama dengan CLI. Bedanya ada di cara input dan cara berhenti:
+Textual mematikan *processed input* di konsol, jadi Ctrl+C sampai sebagai tombol, bukan sinyal. Ulangi dari snapshot
+`siap-uninstall`, jalankan `.venv\Scripts\python.exe -m distrorelay` langsung di jendela PowerShell (bukan lewat pipeline):
+
+| # | Lewat TUI | Yang dicek | Lolos |
+|---|---|---|---|
+| 2 + 3 | `u` → vm → centang `efi:fedora`, `efi:arch`, `grubdir:grub` (spasi) → preflight + centang USB darurat → backup ke E: → `HAPUS` | Post-check hijau; restart langsung masuk Windows; dashboard sesudahnya tidak lagi menampilkan Fedora/Arch | [x] 2026-10-22: dituntaskan setelah 7b/7q/7c (`LANJUT`, rencana menyusut 8 → 6 → 5 → 3 langkah), post-check 8/8, journal: 3 sesi "dituntaskan oleh" sesi hijau; reset paksa → langsung desktop Windows |
+| 7b | Ctrl+C saat langkah 2–3 sedang jalan | Langkah yang sedang jalan selesai lalu berhenti; journal "dihentikan"; `u` berikutnya minta `LANJUT` | [x] 2026-10-22: Ctrl+C saat langkah 2 → "setelah langkah 2 dari 8"; banner kuning + layar `LANJUT` muncul |
+| 7c | Tutup jendela (X / Alt+F4) saat eksekusi | Journal "dihentikan" (atau TERPUTUS kalau lewat ±5 detik); Windows tetap boot | [x] 2026-10-22: Alt+F4 saat langkah 2 → `session-end` "Jendela ditutup… setelah langkah 2 dari 5" < 1 detik sesudahnya |
+| 7q | Ctrl+Q saat eksekusi | Aplikasi tidak keluar; berhenti dengan rapi seperti 7b | [x] 2026-10-22: "Dihentikan pengguna (Ctrl+Q) setelah langkah 1 dari 6", aplikasi tetap terbuka |
+| 7 | `DISTRORELAY_DEV=1`, `DISTRORELAY_FAIL_AFTER=3`, lalu wizard sampai `HAPUS` | TUI menampilkan error, aplikasi tetap hidup, journal TERPUTUS, banner kuning di dashboard | [ ] (opsional; jalur crash sama dengan fase A, tampilannya diuji Pilot) |
+| 9 | `p` → pilih backup → centang `EFI\fedora` + entri Fedora → `PULIHKAN` | Folder + entri kembali, tidak dobel setelah 2× reboot | [~] 2026-10-22: backup 20261022-125219 → `EFI\fedora` (6 file, hash cocok) + 1 entri Fedora, 4/4 ok, dashboard menampilkan 1 entri. Cek 2× reboot terputus karena VM freeze (NEM); lanjutkan dari snapshot `fase-b-sesudah-restore` |
+
+Catatan gate fase B: host masih menjalankan Hyper-V (Memory Integrity / HVCI aktif), jadi VirtualBox jalan di mode NEM
+dan sesekali freeze total (juga sebelum DistroRelay dijalankan). Script bantu: `tesvm\vmkeys.ps1` (keyboard + screenshot),
+`tesvm\reboot-check.ps1` (reset + `bcdedit /enum firmware`). Temuan: dashboard 1 baris lebih tinggi dari layar → baris
+status tergulung keluar di terminal sungguhan (diperbaiki dengan CSS, ada test regresi).
+
 ## Khusus M2a (sudah bisa dicoba sekarang)
 
 - [ ] `distrorelay backup --usb <huruf>` di VM: semua verifikasi `[ok]`, folder `esp\` di USB lengkap

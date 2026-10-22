@@ -4,10 +4,10 @@ Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → unin
 
 Masalah awalnya: setelah partisi Linux di-wipe, GRUB masih muncul saat boot karena folder bootloader di EFI System Partition (ESP), entri boot di NVRAM, dan partisi pendukung seperti `/boot` tidak ikut terhapus.
 
-## Status: M0 + M1 + M2a + M2b (CLI)
+## Status: M0 + M1 + M2a + M2b + M2c (CLI + wizard TUI)
 
-Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` menghapus entri boot dan folder ESP.**
-Jalankan perintah itu **di VM dulu** (lihat [tests/vm/SCENARIOS.md](tests/vm/SCENARIOS.md)). Di laptop asli, `uninstall` menolak jalan
+Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` (juga wizard uninstall di TUI) menghapus entri boot dan folder ESP.**
+Jalankan **di VM dulu** (lihat [tests/vm/SCENARIOS.md](tests/vm/SCENARIOS.md)). Di laptop asli, `uninstall` menolak jalan
 kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat sudah dicoba, dan kamu mengonfirmasi bahwa test di VM sudah lolos.
 
 | Milestone | Isi | Status |
@@ -16,8 +16,8 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M1a | Scan inventaris: disk/partisi, isi ESP, entri boot (`bcdedit`), BitLocker | ✅ |
 | M1b | Scan analisis: NVRAM mentah, header filesystem (fsprobe), reference graph per instalasi | ✅ |
 | M2a | Preflight, backup per lapisan + verifikasi + salinan USB, dry-run rencana uninstall, `docs/RECOVERY.md` | ✅ |
-| M2b | Eksekusi uninstall EFI (journal, post-check, `restore`), CLI | ✅ (belum dites di VM) |
-| M2c | Wizard uninstall di TUI | belum |
+| M2b | Eksekusi uninstall EFI (journal, post-check, `restore`), CLI | ✅ (lolos skenario VM) |
+| M2c | Alur tunggal `UninstallFlow`/`RestoreFlow`; wizard uninstall, menu Pulihkan, dan journal di TUI | ✅ fase A + B lolos VM (sisa: cek 2× reboot skenario 9) |
 | M3 | Hapus partisi Linux | belum |
 | M4–M7 | Profil + setup Linux, backup Linux, ISO manager, rilis `.exe` | belum |
 
@@ -80,7 +80,13 @@ python -m venv .venv
 Rencana uninstall selalu berurutan supaya laptop tetap bisa boot ke Windows di setiap titik:
 Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
 
-Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroRelay\reports\`, `q` keluar.
+Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroRelay\reports\`, `u` wizard uninstall,
+`p` Pulihkan, `j` journal, `q` keluar. Dashboard sendiri read-only. Banner kuning muncul kalau ada sesi uninstall yang belum tuntas.
+
+Wizard uninstall (`u`) memakai alur yang sama dengan CLI `uninstall`: sesi belum tuntas (ketik `LANJUT`) → mode VM/asli →
+scan + pilih kandidat (spasi = centang, rencana dry-run tampil di sebelahnya) → preflight → backup baru atau pakai yang ada →
+dry-run + gerbang + ketik `HAPUS` → eksekusi + post-check. Selama eksekusi, Ctrl+C / Esc / Ctrl+Q = berhenti dengan rapi
+setelah langkah yang sedang jalan. Menu Pulihkan (`p`): pilih backup → centang folder ESP / entri boot → ketik `PULIHKAN`.
 Log ada di `%LOCALAPPDATA%\DistroRelay\logs\`.
 
 ## Test
@@ -97,7 +103,7 @@ Test tidak menyentuh sistem: perintah memakai `FakeRunner`, ESP memakai folder s
 src/distrorelay/
 ├─ __main__.py            CLI & elevasi admin
 ├─ render.py              tampilan bersama untuk CLI dan TUI
-├─ tui/app.py             dashboard Textual
+├─ tui/                   dashboard + wizard uninstall, Pulihkan, journal (Textual; hanya lewat workflow)
 └─ windows/
    ├─ runner.py           Runner, FakeRunner, ReadOnlyRunner
    ├─ disks.py            inventaris disk/partisi
@@ -108,5 +114,15 @@ src/distrorelay/
    ├─ fsprobe.py          kenali filesystem dari superblock
    ├─ bootrefs.py         reference graph & kesimpulan per instalasi
    ├─ bitlocker.py        status BitLocker
-   └─ scanner.py          orkestrasi scan & laporan JSON
+   ├─ scanner.py          orkestrasi scan & laporan JSON
+   ├─ machine.py          deteksi VM atau mesin fisik
+   ├─ preflight.py        cek sebelum backup & eksekusi
+   ├─ backup.py           backup per lapisan + verifikasi
+   ├─ uninstall_plan.py   rencana uninstall (dry-run)
+   ├─ execute.py          eksekusi + gerbang
+   ├─ journal.py          journal eksekusi
+   ├─ postcheck.py        post-check sesudah eksekusi
+   ├─ restore.py          pemulihan folder ESP & entri boot
+   ├─ stopping.py         berhenti rapi (Ctrl+C, jendela ditutup)
+   └─ workflow.py         UninstallFlow & RestoreFlow: satu-satunya jalan ke perubahan sistem
 ```

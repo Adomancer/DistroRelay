@@ -50,6 +50,12 @@ def restore_runner(inner: Runner) -> tuple[AllowListRunner, set[str]]:
     return AllowListRunner(inner, rules=(copy_bootmgr, set_path, add_last, rollback)), created
 
 
+def protected_esp_item(item: str) -> bool:
+    """Seluruh ESP, EFI\\, dan milik Windows tidak dipulihkan dari sini."""
+    low = norm_path(item).lower()
+    return not low or low in ("efi", "efi\\microsoft") or low.startswith("efi\\microsoft\\")
+
+
 def restore_esp_items(backup_dir: Path, items: Sequence[str], esp_root: Path) -> list[Verification]:
     backup_dir = Path(backup_dir)
     manifest = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -60,7 +66,7 @@ def restore_esp_items(backup_dir: Path, items: Sequence[str], esp_root: Path) ->
             norm = norm_path(item)
             low = norm.lower()
             label = f"Pulihkan {norm or item}"
-            if not norm or low in ("efi", "efi\\microsoft") or low.startswith("efi\\microsoft\\"):
+            if protected_esp_item(item):
                 results.append(Verification(label, False, "Dilindungi; pulihkan Windows lewat docs/RECOVERY.md (bcdboot)"))
                 continue
             chosen = [e for e in entries if e["path"].lower() == low or e["path"].lower().startswith(low + "\\")]
@@ -129,15 +135,24 @@ def select_backup_entries(records: Sequence[dict], wanted: Sequence[str]) -> tup
     return chosen, None
 
 
+def unrestorable_reason(record: dict) -> str | None:
+    """Kenapa entri ini tidak bisa dibuat ulang otomatis (None = bisa)."""
+    path = record.get("path") or ""
+    if not _EFI_PATH.match(path):
+        return f"Path tidak bisa dipulihkan otomatis: {path or '(kosong)'}"
+    if path.lower().startswith("\\efi\\microsoft\\"):
+        return "Entri Windows dipulihkan lewat bcdboot (docs/RECOVERY.md)"
+    return None
+
+
 def restore_boot_entry(runner: Runner, created: set[str], record: dict) -> Verification:
     """Buat ulang entri firmware dari catatan backup (firmware-entries.json), ditaruh di urutan terakhir."""
     description = record.get("description") or ""
     path = record.get("path") or ""
     label = f"Pulihkan entri '{description}'"
-    if not _EFI_PATH.match(path):
-        return Verification(label, False, f"Path tidak bisa dipulihkan otomatis: {path or '(kosong)'}")
-    if path.lower().startswith("\\efi\\microsoft\\"):
-        return Verification(label, False, "Entri Windows dipulihkan lewat bcdboot (docs/RECOVERY.md)")
+    reason = unrestorable_reason(record)
+    if reason:
+        return Verification(label, False, reason)
 
     config, _ = load_firmware(runner)
     if any(e.description == description and (e.path or "").lower() == path.lower() for e in config.entries):

@@ -1,4 +1,4 @@
-"""Alur uninstall (M2c fase A): satu-satunya jalan dari pilihan pengguna ke eksekusi, dipakai CLI dan TUI.
+"""Alur uninstall & pemulihan (M2c): satu-satunya jalan dari pilihan pengguna ke perubahan sistem, dipakai CLI dan TUI.
 
 UI hanya bertanya dan menampilkan. Urutan langkah dan syaratnya dipaksa di sini:
 
@@ -9,6 +9,9 @@ UI hanya bertanya dan menampilkan. Urutan langkah dan syaratnya dipaksa di sini:
    Tiket mengikat hash rencana, ID + hash manifest backup, konfirmasi manual, dan mode. Langkah apa pun yang
    mengubah keadaan (scan, pilih, mode, preflight, konfirmasi, backup, gerbang) membatalkan tiket yang ada, dan
    tiket hanya bisa dipakai sekali.
+
+Pemulihan (`RestoreFlow`) memakai disiplin yang sama: backup diverifikasi ulang, lalu `RestoreTicket` sekali pakai
+diterbitkan sesudah PULIHKAN diketik, terikat ke backup dan item yang dipilih.
 """
 
 from __future__ import annotations
@@ -21,17 +24,30 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import flush
-from .backup import BackupResult, Verification, backup_runner, backups_root, create_backup
+from ..format import human_size
+from . import disks, flush
+from .backup import BackupResult, Verification, backup_runner, backups_root, create_backup, verify_backup_dir
+from .bootrefs import Component, Installation
+from .esp import norm_path
 from .execute import DEV_FLAG_ENV, FAIL_AFTER_ENV, ExecutionResult, GateResult, check_gate, execute_plan, execution_runner
 from .journal import Journal, SessionSummary, incomplete_sessions, journal_dir
 from .machine import Machine
 from .postcheck import post_check
 from .preflight import PreflightResult, external_volumes
+from .restore import (
+    describe_entry,
+    entry_label,
+    protected_esp_item,
+    restore_boot_entry,
+    restore_esp_items,
+    restore_runner,
+    select_backup_entries,
+    unrestorable_reason,
+)
 from .runner import Runner
 from .scanner import ScanReport
 from .stopping import StopSignal
-from .uninstall_plan import UninstallPlan, build_plan, expand_selection
+from .uninstall_plan import SELECTABLE_KINDS, UninstallPlan, build_plan, expand_selection
 
 CONTINUE_WORD = "LANJUT"
 DELETE_WORD = "HAPUS"
@@ -61,6 +77,10 @@ def fail_after_from_env() -> str | None:
     return os.environ.get(FAIL_AFTER_ENV) if os.environ.get(DEV_FLAG_ENV) == "1" else None
 
 
+def _load_inventory(runner: Runner) -> disks.DiskInventory:
+    return disks.load_inventory(runner)[0]
+
+
 @dataclass
 class FlowDeps:
     scan: Callable[..., ScanReport]  # scan(progress=...) -> ScanReport
@@ -76,6 +96,7 @@ class FlowDeps:
     external_roots: Callable[[ScanReport], list[Path]] = _default_external_roots
     signature_of: Callable | None = None
     fail_after: str | None = None
+    load_inventory: Callable[[Runner], disks.DiskInventory] = _load_inventory
 
 
 def default_deps() -> FlowDeps:
@@ -115,6 +136,38 @@ def plan_hash(plan: UninstallPlan) -> str:
 
 def _manifest_hash(manifest: dict | None) -> str:
     return hashlib.sha256(json.dumps(manifest or {}, sort_keys=True, default=str).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class BackupInfo:
+    backup_id: str
+    created_at: str
+    usb_copy: bool  # False = dibuat dengan --local-only, tidak memenuhi syarat eksekusi
+
+    def describe(self) -> str:
+        where = "lokal + drive eksternal" if self.usb_copy else "lokal saja (--local-only)"
+        return f"{self.backup_id}  ({where})"
+
+
+def list_backups(root: Path) -> list[BackupInfo]:
+    """Backup lokal yang punya manifest, terbaru dulu. Isinya belum diverifikasi."""
+    found = []
+    for path in Path(root).glob("*"):
+        try:
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        found.append(BackupInfo(path.name, str(manifest.get("created_at") or ""), bool(manifest.get("usb_copy"))))
+    return sorted(found, key=lambda b: b.backup_id, reverse=True)
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """Satu komponen yang bisa ditampilkan di layar pilih. `blocked` = alasan tidak bisa dipilih (None = bisa)."""
+
+    installation: Installation
+    component: Component
+    blocked: str | None
 
 
 @dataclass(frozen=True)
@@ -201,6 +254,24 @@ class UninstallFlow:
         self._changed()
         return self.report
 
+    def candidates(self) -> list[Candidate]:
+        """Komponen instalasi Linux / tak terkait, masing-masing dengan alasan kalau tidak bisa dipilih.
+
+        Alasannya diambil dari rencana itu sendiri (komponen itu sendirian), jadi sama persis dengan yang akan
+        diblokir `select()`. Tidak mengubah keadaan alur.
+        """
+        if self.report is None or self.report.analysis is None:
+            raise FlowError("Scan dulu (analisis belum ada)")
+        analysis = self.report.analysis
+        found = []
+        for inst in analysis.installations:
+            if inst.kind not in SELECTABLE_KINDS:
+                continue
+            for comp in inst.components:
+                blocked = build_plan(analysis, self.report.boot_entries, [comp.ref]).blocked
+                found.append(Candidate(inst, comp, blocked[0] if blocked else None))
+        return found
+
     def select(self, selectors: Sequence[str]) -> UninstallPlan:
         if self.report is None or self.report.analysis is None:
             raise FlowError("Scan dulu (analisis belum ada)")
@@ -252,9 +323,13 @@ class UninstallFlow:
         self._changed()
         return result
 
+    def existing_backups(self) -> list[BackupInfo]:
+        return list_backups(self.deps.backups_root)
+
     def use_backup(self, backup_id: str) -> None:
         """Pakai backup yang sudah ada (CLI `--backup`). Gerbang tetap memverifikasinya ulang."""
         self.backup_id = backup_id
+        self.backup_result = None
         self._changed()
 
     # --- 6. Gerbang & konfirmasi akhir ----------------------------------------
@@ -369,3 +444,180 @@ class UninstallFlow:
         checks = post_check(self.plan, self.gate_result.manifest, self.report, after)
         self.journal.post_check(all(c.ok for c in checks), [c.name for c in checks if not c.ok])
         return checks
+
+
+# --- Pemulihan ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RestoreChoice:
+    key: str  # path ESP (EFI\fedora) atau Boot####/GUID entri
+    label: str
+    blocked: str | None = None  # alasan tidak bisa dipulihkan dari sini (None = bisa)
+
+
+@dataclass(frozen=True)
+class RestoreTicket:
+    backup_id: str
+    manifest_hash: str
+    esp_items: tuple[str, ...]
+    entries: tuple[str, ...]
+    generation: int
+
+
+def _durable(label: str, action: Callable[[], None]) -> Verification:
+    try:
+        action()
+    except flush.FlushError as exc:
+        return Verification(label, False, str(exc))
+    return Verification(label, True, "Ya")
+
+
+def _esp_group(path: str) -> str:
+    """'EFI\\fedora\\shimx64.efi' -> 'EFI\\fedora'; 'grub\\grub.cfg' -> 'grub'; 'mach_kernel' -> 'mach_kernel'."""
+    parts = path.split("\\")
+    return "\\".join(parts[:2]) if parts[0].lower() == "efi" and len(parts) >= 2 else parts[0]
+
+
+class RestoreFlow:
+    """Pulihkan folder/file ESP dan entri boot firmware dari backup DistroRelay (menu Pulihkan)."""
+
+    def __init__(self, deps: FlowDeps):
+        self.deps = deps
+        self.backup_id: str | None = None
+        self.manifest: dict | None = None
+        self.records: list[dict] = []
+        self.verifications: list[Verification] = []
+        self.esp_items: list[str] = []
+        self.entries: list[dict] = []
+        self._ticket: RestoreTicket | None = None
+        self._generation = 0
+
+    def _changed(self) -> None:
+        self._generation += 1
+        self._ticket = None
+
+    def backups(self) -> list[BackupInfo]:
+        return list_backups(self.deps.backups_root)
+
+    def load(self, backup_id: str) -> list[Verification]:
+        """Verifikasi ulang backup lokal, lalu baca isinya. Backup yang gagal verifikasi tidak bisa dipakai."""
+        self.backup_id, self.manifest, self.records = None, None, []
+        self.esp_items, self.entries = [], []
+        self._changed()
+        directory = Path(self.deps.backups_root) / (backup_id or "")
+        if not backup_id or Path(backup_id).name != backup_id or not (directory / "manifest.json").exists():
+            self.verifications = [Verification("Backup", False, f"Backup '{backup_id}' tidak ada di {self.deps.backups_root}")]
+            return self.verifications
+        self.verifications = verify_backup_dir(directory)
+        if all(v.ok for v in self.verifications):
+            self.manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+            self.records = json.loads((directory / "firmware-entries.json").read_text(encoding="utf-8"))
+            self.backup_id = backup_id
+        return self.verifications
+
+    def _require_backup(self) -> Path:
+        if self.backup_id is None or self.manifest is None:
+            raise FlowError("Pilih backup yang lolos verifikasi dulu")
+        return Path(self.deps.backups_root) / self.backup_id
+
+    def esp_choices(self) -> list[RestoreChoice]:
+        """Folder di EFI\\ dan folder/file di root ESP yang ada di backup."""
+        self._require_backup()
+        groups: dict[str, list[dict]] = {}
+        for entry in self.manifest.get("esp_files", []):
+            groups.setdefault(_esp_group(entry["path"]), []).append(entry)
+        return [
+            RestoreChoice(
+                key,
+                f"{key}  ({len(files)} file, {human_size(sum(f.get('size', 0) for f in files))})",
+                "Milik Windows: pulihkan lewat docs/RECOVERY.md (bcdboot)" if protected_esp_item(key) else None,
+            )
+            for key, files in sorted(groups.items(), key=lambda item: item[0].lower())
+        ]
+
+    def entry_choices(self) -> list[RestoreChoice]:
+        self._require_backup()
+        return [RestoreChoice(entry_label(r), describe_entry(r), unrestorable_reason(r)) for r in self.records]
+
+    def select(self, esp_items: Sequence[str], entries: Sequence[str]) -> str | None:
+        """Tetapkan yang dipulihkan. Hasilnya masalah pertama yang ditemukan (None = pilihan berlaku)."""
+        self._require_backup()
+        self.esp_items, self.entries = [], []
+        self._changed()
+        chosen, problem = select_backup_entries(self.records, list(entries))
+        if problem:
+            return problem
+        for record in chosen:
+            reason = unrestorable_reason(record)
+            if reason:
+                return f"Entri {describe_entry(record)}: {reason}"
+        for item in esp_items:
+            if protected_esp_item(item):
+                return f"{item or '(kosong)'}: dilindungi; pulihkan Windows lewat docs/RECOVERY.md (bcdboot)"
+        if not esp_items and not chosen:
+            return "Belum ada yang dipilih"
+        self.esp_items = list(dict.fromkeys(norm_path(item) for item in esp_items))
+        self.entries = chosen
+        return None
+
+    def summary(self) -> str:
+        return (
+            f"Akan dipulihkan dari backup {self.backup_id}: folder/file {', '.join(self.esp_items) or '-'}; "
+            f"entri {', '.join(describe_entry(r) for r in self.entries) or '-'}"
+        )
+
+    def authorize(self, word: str) -> RestoreTicket | None:
+        """Tiket pemulihan kalau PULIHKAN diketik persis. None = tidak diketik."""
+        self._require_backup()
+        if not self.esp_items and not self.entries:
+            raise FlowError("Pilih yang dipulihkan dulu")
+        if not typed(word, RESTORE_WORD):
+            return None
+        self._ticket = RestoreTicket(
+            self.backup_id,
+            _manifest_hash(self.manifest),
+            tuple(self.esp_items),
+            tuple(entry_label(r) for r in self.entries),
+            self._generation,
+        )
+        return self._ticket
+
+    def run(self, ticket: RestoreTicket | None, progress: Callable[[str], None] | None = None) -> list[Verification]:
+        if ticket is None or ticket is not self._ticket or ticket.generation != self._generation:
+            raise FlowError("Tiket pemulihan tidak berlaku: pilihan berubah sejak PULIHKAN diketik")
+        self._ticket = None  # sekali pakai
+        say = progress or (lambda message: None)
+        directory = self._require_backup()
+
+        # Backup dibaca lagi tepat sebelum dipakai: isinya bisa berubah sejak dipilih.
+        say("Memverifikasi ulang backup…")
+        failed = [v for v in verify_backup_dir(directory) if not v.ok]
+        if failed:
+            return failed
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        if _manifest_hash(manifest) != ticket.manifest_hash:
+            return [Verification("Backup", False, "manifest.json berubah sejak backup dipilih")]
+
+        runner, created = restore_runner(self.deps.inner_runner)
+        results: list[Verification] = []
+        if self.esp_items:
+            esp = self.deps.load_inventory(runner).esp()
+            expected = (manifest.get("esp_partition") or {}).get("guid") or ""
+            if esp is None:
+                results.append(Verification("ESP", False, "ESP tidak ditemukan"))
+            elif expected and esp.guid.lower() != expected.lower():
+                results.append(
+                    Verification("ESP sama dengan saat backup", False, f"GUID ESP sekarang {esp.guid}, di backup {expected}")
+                )
+            else:
+                say("Memulihkan folder/file ESP…")
+                with self.deps.mount_esp(runner, esp) as mounted:
+                    results += restore_esp_items(directory, self.esp_items, mounted.root)
+                    results.append(_durable("Folder/file ESP ditulis ke disk", lambda: self.deps.flush_volume(mounted.root)))
+        for record in self.entries:
+            say(f"Membuat ulang entri {describe_entry(record)}…")
+            results.append(restore_boot_entry(runner, created, record))
+        if self.entries:
+            results.append(_durable("BCD ditulis ke disk", self.deps.flush_bcd))
+        return results

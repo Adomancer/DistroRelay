@@ -1,127 +1,124 @@
-"""Dashboard scan read-only (M1)."""
+"""Aplikasi TUI: dashboard scan read-only (M1) + wizard uninstall, menu Pulihkan, dan journal (M2c fase B).
+
+Semua yang mengubah sistem lewat `windows.workflow` (UninstallFlow / RestoreFlow). TUI tidak pernah memanggil
+executor, Runner, flush, atau modul restore secara langsung (dijaga test arsitektur).
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Callable
 
-from rich.text import Text
-from textual import work
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.widgets import DataTable, Footer, Header, Static, TabbedContent, TabPane, Tree
+from textual.app import App
+from textual.screen import Screen
 
-from .. import render
-from ..paths import reports_dir
-from ..windows.scanner import ScanReport, report_to_json, run_scan
+from ..windows.journal import SessionSummary, incomplete_sessions, sessions
+from ..windows.scanner import ScanReport
+from ..windows.stopping import StopSignal
+from ..windows.workflow import FlowDeps, RestoreFlow, UninstallFlow, default_deps
+from .dashboard import DashboardScreen
+from .recovery import RecoveryScreen
+from .sessions import SessionsScreen
+from .uninstall import first_screen
 
 
 class DistroRelayApp(App):
     TITLE = "DistroRelay"
-    SUB_TITLE = "Scan read-only: tidak ada yang diubah"
     CSS = """
     #status { height: auto; padding: 0 1; background: $boost; }
+    /* Bawaan Textual: TabbedContent/ContentSwitcher/TabPane setinggi isinya (auto), jadi dashboard 1 baris lebih
+       tinggi dari layar dan tergulung; baris status di atas ikut hilang di terminal sungguhan (uji VM 2026-10-22). */
+    DashboardScreen TabbedContent, DashboardScreen ContentSwitcher, DashboardScreen TabPane { height: 1fr; }
     Tree, DataTable { height: 1fr; }
     #info { padding: 1 2; }
+    .step-title { padding: 0 1; background: $primary-background; }
+    .help { padding: 0 1 1 1; color: $text-muted; }
+    .body { height: 1fr; }
+    #plan-pane, #items-pane { width: 1fr; padding: 0 1; }
+    #candidates { width: 1fr; }
+    #backup-pane { width: 42; padding: 0 1; }
+    #backups { height: 1fr; }
+    #esp-items, #boot-entries { height: auto; max-height: 12; }
+    #existing { height: auto; max-height: 10; }
+    #statements, #confirmations { height: auto; }
+    #nav { height: auto; padding: 0 1; }
+    #nav Button { margin-right: 2; }
+    #log { height: auto; max-height: 16; }
     """
-    BINDINGS = [
-        Binding("r", "rescan", "Scan ulang"),
-        Binding("s", "save", "Simpan laporan JSON"),
-        Binding("q", "quit", "Keluar"),
-    ]
 
-    def __init__(self, log_path: str | None = None, scan: Callable[..., ScanReport] = run_scan) -> None:
+    def __init__(
+        self,
+        log_path: str | None = None,
+        scan: Callable[..., ScanReport] | None = None,
+        deps: FlowDeps | None = None,
+    ) -> None:
         super().__init__()
         self.report: ScanReport | None = None
         self.log_path = log_path
-        self._run_scan = scan
+        self._scan = scan
+        self._deps = deps
+        self.stop_signal: StopSignal | None = None  # diisi layar eksekusi selama uninstall berjalan
+        self.quit_blocker: str | None = None  # alasan aplikasi tidak boleh ditutup sekarang
 
-    def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static("Menyiapkan scan…", id="status")
-        with TabbedContent(initial="tab-summary"):
-            with TabPane("Ringkasan", id="tab-summary"):
-                yield Tree(Text("Hasil scan"), id="summary")
-            with TabPane("Partisi", id="tab-partitions"):
-                yield DataTable(id="partitions", zebra_stripes=True, cursor_type="row")
-            with TabPane("Entri boot", id="tab-entries"):
-                yield DataTable(id="entries", zebra_stripes=True, cursor_type="row")
-            with TabPane("Isi ESP", id="tab-esp"):
-                yield Tree(Text("ESP"), id="esp")
-            with TabPane("Info & peringatan", id="tab-info"):
-                with VerticalScroll():
-                    yield Static(id="info")
-        yield Footer()
+    def get_default_screen(self) -> Screen:
+        return DashboardScreen()
 
-    def on_mount(self) -> None:
-        self.action_rescan()
+    # --- ketergantungan --------------------------------------------------------
+    def deps(self) -> FlowDeps:
+        if self._deps is None:
+            self._deps = default_deps()
+        return self._deps
 
-    def action_rescan(self) -> None:
-        self._set_status("Memulai scan…")
-        self._scan()
+    def run_scan(self, progress=None) -> ScanReport:
+        return (self._scan or self.deps().scan)(progress=progress)
 
-    @work(thread=True, exclusive=True, group="scan")
-    def _scan(self) -> None:
-        try:
-            report = self._run_scan(progress=lambda message: self.call_from_thread(self._set_status, message))
-        except Exception as exc:  # jaga-jaga: run_scan sendiri sudah menangkap error per langkah
-            self.call_from_thread(self._set_status, f"Scan gagal: {type(exc).__name__}: {exc}")
+    def unfinished_sessions(self) -> list[SessionSummary]:
+        return incomplete_sessions(self.deps().journal_dir)
+
+    def sessions(self) -> list[SessionSummary]:
+        return sessions(self.deps().journal_dir)
+
+    # --- navigasi -------------------------------------------------------------
+    def _dashboard_busy(self) -> bool:
+        if self.screen_stack[0].scanning:
+            self.notify("Tunggu scan dashboard selesai dulu.", severity="warning")
+            return True
+        return False
+
+    def action_uninstall(self) -> None:
+        if not self._dashboard_busy():
+            self.push_screen(first_screen(UninstallFlow(self.deps())))
+
+    def action_recovery(self) -> None:
+        if not self._dashboard_busy():
+            self.push_screen(RecoveryScreen(RestoreFlow(self.deps())))
+
+    def action_sessions(self) -> None:
+        self.push_screen(SessionsScreen())
+
+    def back_to_dashboard(self, rescan: bool = False) -> None:
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
+        if rescan:
+            self.screen_stack[0].action_rescan()
+
+    async def action_quit(self) -> None:
+        if self.stop_signal is not None:
+            # Uninstall sedang berjalan: keluar = berhenti dengan rapi dulu, bukan memotong langkah.
+            stopper = getattr(self.screen, "action_request_stop", None)
+            if stopper is not None:
+                stopper("Ctrl+Q")
+            else:
+                self.stop_signal.request("Dihentikan pengguna (Ctrl+Q)")
+            self.notify("Uninstall berhenti setelah langkah ini selesai. Tekan Ctrl+Q lagi setelah itu untuk keluar.")
             return
-        self.call_from_thread(self._show, report)
-
-    def _set_status(self, message: str) -> None:
-        self.query_one("#status", Static).update(Text(message))
-
-    def _show(self, report: ScanReport) -> None:
-        self.report = report
-        problems = [i for i in report.issues if i.severity != "info"]
-        status = Text(f"Scan selesai {report.created_at}. ")
-        if not report.is_admin:
-            status.append("Bukan Administrator: sebagian data tidak terbaca. ", style="bold yellow")
-        if problems:
-            status.append(f"{len(problems)} langkah bermasalah (lihat tab Info). ", style="yellow")
-        status.append("Tekan s untuk menyimpan laporan.", style="dim")
-        self.query_one("#status", Static).update(status)
-
-        _fill_tree(self.query_one("#summary", Tree), render.summary_nodes(report))
-        _fill_table(self.query_one("#partitions", DataTable), render.PARTITION_COLUMNS, render.partition_rows(report))
-        _fill_table(self.query_one("#entries", DataTable), render.ENTRY_COLUMNS, render.entry_rows(report))
-        _fill_tree(self.query_one("#esp", Tree), render.esp_nodes(report))
-        self.query_one("#info", Static).update(render.info_text(report, self.log_path))
-
-    def action_save(self) -> None:
-        if self.report is None:
-            self.notify("Belum ada hasil scan", severity="warning")
+        if self.quit_blocker:
+            self.notify(self.quit_blocker, severity="warning")
             return
-        directory = reports_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"scan-{datetime.now():%Y%m%d-%H%M%S}.json"
-        path.write_text(report_to_json(self.report), encoding="utf-8")
-        self.notify(str(path), title="Laporan disimpan", markup=False)
+        self.exit()
 
-
-def _fill_tree(tree: Tree, nodes: list[render.Node]) -> None:
-    tree.clear()
-    tree.root.expand()
-
-    def add(parent, node: render.Node) -> None:
-        if node.children:
-            branch = parent.add(node.label, expand=node.expanded)
-            for child in node.children:
-                add(branch, child)
-        else:
-            parent.add_leaf(node.label)
-
-    for node in nodes:
-        add(tree.root, node)
-
-
-def _fill_table(table: DataTable, columns: tuple[str, ...], rows: list[tuple[Text, ...]]) -> None:
-    table.clear(columns=True)
-    table.add_columns(*columns)
-    for row in rows:
-        table.add_row(*row)
+    def action_help_quit(self) -> None:
+        """Ctrl+C di luar eksekusi: Textual tidak keluar dengan Ctrl+C, jadi beri tahu caranya."""
+        self.notify("Tekan Ctrl+Q (atau q di dashboard) untuk keluar.")
 
 
 def run_tui(log_path: str | None = None) -> int:
