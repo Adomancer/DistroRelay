@@ -155,6 +155,7 @@ ALLOWED_CMDLETS = frozenset(
         "get-volume",
         "get-ciminstance",
         "get-authenticodesignature",
+        "get-partitionsupportedsize",  # batas shrink C: (M6), hanya membaca
         "convertto-json",
         "foreach-object",
         "select-object",

@@ -4,7 +4,7 @@ Toolkit distro-hopping untuk laptop dual-boot Windows + Linux: **backup → unin
 
 Masalah awalnya: setelah partisi Linux di-wipe, GRUB masih muncul saat boot karena folder bootloader di EFI System Partition (ESP), entri boot di NVRAM, dan partisi pendukung seperti `/boot` tidak ikut terhapus.
 
-## Status: M0 + M1 + M2 + M3 (CLI + wizard TUI), M4 + M5 (Linux kit + backup)
+## Status: M0 + M1 + M2 + M3 (CLI + wizard TUI), M4 + M5 (Linux kit + backup), M6 (ISO manager + shrink C:)
 
 Scan, dry-run, dan backup tidak mengubah sistem. **`uninstall` (juga wizard uninstall di TUI) menghapus entri boot, folder ESP, dan partisi Linux yang dipilih.**
 Jalankan **di VM dulu** (lihat [tests/vm/SCENARIOS.md](tests/vm/SCENARIOS.md)). Di laptop asli, `uninstall` menolak jalan
@@ -21,7 +21,8 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M3 | Hapus partisi Linux (pengaman + ketik ID partisi, aturan backup bertingkat), pulihkan partisi, perluas C: kalau bersebelahan | ✅ kode + test simulasi; skenario VM belum |
 | M4 | Profil (TOML) + peta nama paket per distro, export Linux kit ke USB/NTFS, `setup` di distro baru | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
 | M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import`, aturan backup bertingkat (a) | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
-| M6–M7 | ISO manager, rilis `.exe` | belum |
+| M6 | ISO manager (cek versi terbaru, unduh yang bisa dilanjutkan, verifikasi GPG + SHA256, salin ke Ventoy), shrink C: | ✅ kode + test (tanda tangan asli distro dicek dengan gpgv); unduh ISO penuh, salin ke Ventoy, dan shrink di VM belum |
+| M7 | Rilis `.exe` (PyInstaller) | belum |
 
 ## Apa yang dilakukan scan
 
@@ -164,6 +165,45 @@ sh bootstrap.sh setup --backup latest|none|DIR   # default: backup terbaru yang 
 - Backup mencatat UUID filesystem `/` dan `/home` (+ LUKS). Saat uninstall di Windows, partisi yang UUID-nya tercatat
   di backup Linux terverifikasi di drive eksternal tidak perlu pernyataan "DATA SUDAH DIBACKUP" (tetap ada peringatan).
 
+## ISO manager (M6): siapkan USB Ventoy
+
+Cek versi terbaru Fedora, Arch, Ubuntu LTS, dan Linux Mint dari feed resmi, unduh ISO-nya, verifikasi, lalu salin ke
+USB [Ventoy](https://www.ventoy.net). Tidak butuh admin.
+
+```powershell
+.venv\Scripts\python.exe -m distrorelay iso check               # versi terbaru vs ISO di USB Ventoy (label "Ventoy")
+.venv\Scripts\python.exe -m distrorelay iso download fedora     # unduh + verifikasi; Ctrl+C lalu ulangi = dilanjutkan
+.venv\Scripts\python.exe -m distrorelay iso download mint --edition xfce
+.venv\Scripts\python.exe -m distrorelay iso verify fedora       # verifikasi ulang tanpa internet
+.venv\Scripts\python.exe -m distrorelay iso copy fedora         # verifikasi ulang, lalu salin + baca ulang dari USB
+.venv\Scripts\python.exe -m distrorelay iso keys                # kunci bawaan + lokasi gpgv
+```
+
+- **Dua lapis verifikasi, dua-duanya wajib lolos** sebelum ISO boleh disalin:
+  1. Tanda tangan GPG dicek `gpgv` terhadap keyring **bawaan aplikasi**
+     ([`windows/iso/keys/`](src/distrorelay/windows/iso/keys)); kunci utama penanda tangan harus ada di daftar
+     fingerprint yang di-pin di kode sumber tiap distro. Fedora: `CHECKSUM` (clearsigned), Ubuntu: `SHA256SUMS.gpg`,
+     Mint: `sha256sum.txt.gpg`, Arch: ISO-nya langsung (`.iso.sig`).
+  2. SHA256 ISO harus sama dengan nilai di file checksum yang sudah terverifikasi (Arch: nilai dari feed resmi).
+- Butuh `gpgv`: dari GnuPG (`winget install GnuPG.GnuPG`) atau yang ikut Git for Windows; dicari otomatis.
+- Unduhan di `%LOCALAPPDATA%\DistroRelay\iso\<distro>\<versi>-<edisi>\`. ISO yang gagal SHA256/tanda tangan
+  disisihkan sebagai `.rejected`.
+- Salin ke USB: SHA256 dihitung saat menyalin, lalu salinannya dibaca ulang. File yang sudah ada dengan isi berbeda tidak
+  ditimpa, USB FAT32 ditolak untuk ISO > 4 GB, dan **ISO versi lama tidak dihapus otomatis**.
+- Kunci Fedora berganti tiap rilis. Rilis yang kuncinya belum ada di keyring bawaan ditolak sampai DistroRelay diperbarui.
+
+### Shrink C: (MENGUBAH partisi, coba di VM dulu)
+
+```powershell
+.venv\Scripts\python.exe -m distrorelay shrink-c              # info: ukuran, ruang kosong, maksimal yang bisa dibebaskan
+.venv\Scripts\python.exe -m distrorelay shrink-c --size 60    # bebaskan 60 GB, konfirmasi ketik KECILKAN
+```
+
+Sama seperti *Shrink Volume* di Disk Management (`Resize-Partition`). Ditolak kalau melewati batas Windows
+(`Get-PartitionSupportedSize`) atau kalau sisa ruang kosong C: jadi kurang dari 20 GB. Script mencocokkan ulang
+GUID/offset/ukuran C: tepat sebelum mengecilkan, dicatat di journal, lalu dicek ulang. Ruang kosongnya muncul tepat
+sesudah C: dan bisa langsung dipakai installer Linux.
+
 ## Struktur
 
 ```
@@ -194,5 +234,7 @@ src/distrorelay/
    ├─ restore.py          pemulihan folder ESP & entri boot
    ├─ stopping.py         berhenti rapi (Ctrl+C, jendela ditutup)
    ├─ workflow.py         UninstallFlow & RestoreFlow: satu-satunya jalan ke perubahan sistem
-   └─ kit_export.py       export Linux kit + profil, cek Fast Startup
+   ├─ kit_export.py       export Linux kit + profil, cek Fast Startup
+   ├─ shrink.py           shrink C: (rencana, script persis, journal, post-check)
+   └─ iso/                ISO manager: sources/ per distro, keys/ (keyring bawaan), download, verify, catalog, manager
 ```

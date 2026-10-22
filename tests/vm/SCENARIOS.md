@@ -132,10 +132,41 @@ jadi opsi Perluas C: tidak muncul dan ruangnya dibiarkan unallocated untuk distr
 | K-5 | Windows: `distrorelay profile import C:\DistroRelay\linux-backups\<id>` → `ya` | Perubahan tampil, `profile.toml.bak-*` dibuat, `profile show` memuat paket baru + `exclude` | [ ] |
 | K-6 | Ubah 1 byte `dotfiles.tar.gz` di backup itu, ulangi K-4 dan K-5 | `backups` menandai RUSAK, `setup` tidak memakainya, `profile import` menolak | [ ] |
 
-**Di Linux sungguhan (VM atau live USB, belakangan):** `setup` sungguhan di Fedora, Arch (dengan paket AUR), dan
-Ubuntu; `backup` dengan kit di USB dan `~/.ssh` di `dotfiles.sensitive` → file `.gpg` ada di USB, lalu `setup` di distro
-lain mengembalikan `~/.ssh` dengan permission 700/600; partisi root Linux yang punya backup tersebut di drive eksternal
-tidak meminta "DATA SUDAH DIBACKUP" di wizard uninstall.
+**Di Linux sungguhan (VM dual-boot atau install sungguhan, belakangan):**
+
+| # | Langkah | Yang dicek | Lolos |
+|---|---|---|---|
+| L-1 | Fedora: `sh bootstrap.sh setup` sungguhan | Repo, paket, dan Flatpak terpasang; laporan akhir masuk akal | [ ] |
+| L-2 | Arch: `setup` dengan paket AUR, setujui bootstrap `paru` | `paru` dan paket AUR terpasang | [ ] |
+| L-3 | Ubuntu 22.04 atau lebih baru: `setup` | apt + Flatpak jalan di Python 3.10 | [ ] |
+| L-4 | Distro lama, kit di USB, `~/.ssh` di `dotfiles.sensitive`: `sh bootstrap.sh backup` | `sensitive.tar.gz.gpg` ada di USB; tidak ada salinan tanpa enkripsi | [ ] |
+| L-5 | Distro lain: `sh bootstrap.sh setup --backup latest` | `~/.ssh` kembali dengan permission 700/600 (`.pub` 644) | [ ] |
+| L-6 | Windows: wizard uninstall untuk partisi root yang punya backup L-4 di drive eksternal | Tidak minta "DATA SUDAH DIBACKUP", peringatan tetap muncul | [ ] |
+
+## Gate M6: ISO manager + shrink C:
+
+**Tanpa VM (di laptop, tidak mengubah sistem).** Butuh internet; ISO Arch ±1,5 GB adalah unduhan terkecil:
+
+| # | Langkah | Yang dicek | Lolos |
+|---|---|---|---|
+| I-1 | `distrorelay iso keys` | 4 distro + fingerprint tampil, `gpgv:` menunjuk ke file yang ada | [ ] |
+| I-2 | `distrorelay iso check` (USB Ventoy dicabut) | Versi terbaru 4 distro tampil; catatan "USB Ventoy tidak terdeteksi" | [ ] |
+| I-3 | `distrorelay iso download arch`, Ctrl+C di tengah, jalankan lagi | Unduhan lanjut dari posisi terakhir (tidak mulai dari 0); akhirnya tanda tangan "sah, oleh Pierre Schmitz" + SHA256 `[ok]` | [ ] |
+| I-4 | Ubah 1 byte ISO di `%LOCALAPPDATA%\DistroRelay\iso\arch\...` (mis. pakai HxD), lalu `iso verify arch` | `[GAGAL]`; ISO disisihkan jadi `.rejected` | [ ] |
+| I-5 | `iso download arch` lagi, lalu colok USB Ventoy → `iso check` | Unduh ulang dari awal + lolos; `check` menampilkan isi USB dan status Arch | [ ] |
+| I-6 | `distrorelay iso copy arch` | Tanda tangan dicek ulang, salin + "Baca ulang dari USB" `[ok]`; ISO Arch lama (kalau ada) tetap di USB; `iso check` → "sudah terbaru" | [ ] |
+| I-7 | Boot laptop/VM dari USB Ventoy itu, pilih ISO Arch | Menu Ventoy menampilkan ISO, dan ISO bisa boot | [ ] |
+| I-8 | (opsional, ±2,7 GB) `iso download fedora` → `iso copy fedora` | Sama seperti I-3/I-6 dengan CHECKSUM clearsigned Fedora | [ ] |
+| I-9 | `distrorelay shrink-c` (tanpa `--size`) | Ukuran C:, ruang kosong, dan "maksimal yang bisa dibebaskan" masuk akal dibanding Disk Management. Tidak ada yang berubah | [ ] |
+
+**Di VM (snapshot dulu), karena mengubah partisi:**
+
+| # | Langkah | Yang dicek | Lolos |
+|---|---|---|---|
+| S-1 | `distrorelay shrink-c --size 10` → ketik `kecilkan` (huruf kecil) | Dibatalkan, tidak ada yang berubah | [ ] |
+| S-2 | `shrink-c --size 10` → ketik `KECILKAN` | C: berkurang 10 GB, ruang kosong 10 GB muncul tepat sesudah C: di Disk Management; `journal` menampilkan sesi selesai + post-check ok | [ ] |
+| S-3 | `shrink-c --size <lebih dari maksimal>` | `[GAGAL]` dengan alasan (batas Windows / sisa kosong 20 GB), tidak ada yang berubah | [ ] |
+| S-4 | Reboot VM | Windows boot normal, `chkdsk C:` (read-only) bersih | [ ] |
 
 ## Khusus M2a (sudah bisa dicoba sekarang)
 

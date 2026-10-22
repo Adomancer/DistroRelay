@@ -20,7 +20,7 @@ distrorelay = "distrorelay.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-distrorelay = ["common/data/*.toml", "common/data/base_packages/*.txt"]
+distrorelay = ["common/data/*.toml", "common/data/base_packages/*.txt", "windows/iso/keys/*.gpg"]
 distrorelay_linux = ["bootstrap.sh"]
 
 [tool.pytest.ini_options]

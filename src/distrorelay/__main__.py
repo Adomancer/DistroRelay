@@ -93,11 +93,37 @@ def build_parser() -> argparse.ArgumentParser:
     switch = fast.add_mutually_exclusive_group()
     switch.add_argument("--off", action="store_true", help="matikan Fast Startup")
     switch.add_argument("--on", action="store_true", help="nyalakan lagi Fast Startup")
+
+    iso = commands.add_parser("iso", help="ISO manager: cek versi terbaru, unduh + verifikasi GPG/SHA256, salin ke Ventoy")
+    iso_commands = iso.add_subparsers(dest="iso_command", required=True)
+    iso_check = iso_commands.add_parser("check", help="versi terbaru tiap distro vs ISO di USB Ventoy")
+    iso_check.add_argument("--drive", metavar="HURUF", help="USB Ventoy (default: dicari dari label 'Ventoy')")
+    iso_download = iso_commands.add_parser("download", help="unduh ISO terbaru lalu verifikasi (bisa dilanjutkan)")
+    iso_download.add_argument("distro", choices=ISO_DISTROS)
+    iso_download.add_argument("--edition", help="mis. KDE (Fedora) atau xfce (Mint)")
+    iso_verify = iso_commands.add_parser("verify", help="verifikasi ulang ISO yang sudah diunduh (tanpa internet)")
+    iso_verify.add_argument("distro", choices=ISO_DISTROS)
+    iso_verify.add_argument("--version", dest="iso_version", metavar="VERSI", help="default: unduhan terbaru")
+    iso_verify.add_argument("--edition", help="kalau ada beberapa edisi yang diunduh")
+    iso_copy = iso_commands.add_parser("copy", help="verifikasi ulang lalu salin ISO ke USB Ventoy")
+    iso_copy.add_argument("distro", choices=ISO_DISTROS)
+    iso_copy.add_argument("--version", dest="iso_version", metavar="VERSI", help="default: unduhan terbaru")
+    iso_copy.add_argument("--edition", help="kalau ada beberapa edisi yang diunduh")
+    iso_copy.add_argument("--drive", metavar="HURUF", help="USB Ventoy (default: dicari dari label 'Ventoy')")
+    iso_commands.add_parser("keys", help="kunci GPG bawaan per distro dan lokasi gpgv")
+
+    shrink = commands.add_parser(
+        "shrink-c", help="kecilkan C: untuk ruang distro baru (MENGUBAH partisi, coba di VM dulu)"
+    )
+    shrink.add_argument("--size", type=float, metavar="GB", help="berapa GB dibebaskan; tanpa ini hanya menampilkan info")
     return parser
 
 
+ISO_DISTROS = ("fedora", "arch", "ubuntu", "mint")
+
+
 # Perintah yang hanya membaca file DistroRelay sendiri tidak perlu hak Administrator.
-_NO_ADMIN_COMMANDS = {"verify-backup", "journal", "profile", "kit"}
+_NO_ADMIN_COMMANDS = {"verify-backup", "journal", "profile", "kit", "iso"}
 
 
 def _ask(prompt: str) -> str:
@@ -550,6 +576,205 @@ def _run_fast_startup_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pick_drive(letter: str | None, volumes, *, required: bool):
+    """(volume, catatan). Tanpa --drive: satu-satunya USB berlabel Ventoy. Volume None = tidak ada / ditolak."""
+    from .windows.iso import catalog
+
+    found = volumes()
+    if letter:
+        wanted = letter.strip(":\\ ").upper()
+        volume = next((v for v in found if v.letter == wanted), None)
+        if volume is None:
+            return None, f"Drive {wanted}: tidak ada."
+        if volume.is_system:
+            return None, f"{wanted}: adalah drive Windows, bukan USB Ventoy."
+        note = None if catalog.is_ventoy(volume) else (
+            f"{wanted}: tidak terlihat seperti USB Ventoy (label '{volume.label}', tanpa folder ventoy); tetap dipakai.")
+        return volume, note
+    ventoys = catalog.ventoy_volumes(found)
+    if len(ventoys) == 1:
+        return ventoys[0], None
+    if ventoys:
+        return None, f"Ada beberapa USB Ventoy ({', '.join(v.letter for v in ventoys)}); pilih dengan --drive HURUF."
+    return None, ("USB Ventoy tidak terdeteksi (label 'Ventoy'). Colokkan, atau pilih dengan --drive HURUF."
+                  if required else "USB Ventoy tidak terdeteksi, jadi hanya versi terbaru yang ditampilkan.")
+
+
+def _byte_progress(console):
+    from rich.progress import (BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn,
+                               TransferSpeedColumn)
+
+    return Progress(TextColumn("{task.description}"), BarColumn(), DownloadColumn(), TransferSpeedColumn(),
+                    TimeRemainingColumn(), console=console, transient=True)
+
+
+def _progress_callback(progress, description: str):
+    task = progress.add_task(description, total=None)
+
+    def update(done: int, total: int | None) -> None:
+        progress.update(task, completed=done, total=total)
+
+    return update
+
+
+def _run_iso_command(args: argparse.Namespace, tools=None, volumes=None) -> int:
+    from rich.console import Console
+
+    from . import render
+    from .format import human_size
+    from .windows.iso import IsoError, catalog, manager, saved_releases, sources, verify
+    from .windows.iso.download import DownloadStopped, fetch
+
+    console = Console()
+    volumes = volumes or catalog.list_volumes
+    if args.iso_command == "keys":
+        console.print(render.iso_keys_text(sources.SOURCES, tools.gpgv if tools else verify.find_gpgv(),
+                                           verify.INSTALL_HINT))
+        return 0
+    if args.iso_command == "check":
+        drive, note = _pick_drive(args.drive, volumes, required=False)
+        if drive is None and args.drive:
+            console.print(note, style="red", markup=False)
+            return 1
+        with console.status("Mengecek versi terbaru…"):
+            rows = catalog.check(sources.SOURCES, tools.fetch if tools else fetch,
+                                 drive=drive.root if drive else None, downloads_root=tools.root if tools else None)
+        console.print(render.iso_catalog_text(rows, drive, note))
+        return 0 if all(row.latest is not None for row in rows) else 1
+
+    gpgv = tools.gpgv if tools else verify.find_gpgv()
+    if not gpgv:
+        console.print(f"gpgv (GnuPG) tidak ditemukan, jadi ISO tidak bisa diverifikasi. Pasang dengan "
+                      f"`{verify.INSTALL_HINT}`, lalu buka terminal baru.", style="bold red", markup=False)
+        return 1
+    tools = tools or manager.Tools(gpgv=gpgv)
+    source = sources.get(args.distro)
+
+    if args.iso_command == "download":
+        try:
+            with console.status(f"Mengecek versi terbaru {source.NAME}…"):
+                release = source.latest(tools.fetch, args.edition)
+            problems = release.problems()
+            if problems:
+                raise IsoError("; ".join(problems))
+            size = f", {human_size(release.size)}" if release.size else ""
+            console.print(f"Terbaru: {source.NAME} {release.version} ({release.edition}{size})", markup=False)
+            with _byte_progress(console) as progress:
+                result = manager.prepare(
+                    release, source.KEYS, tools,
+                    progress=_progress_callback(progress, "Mengunduh"),
+                    hash_progress=_progress_callback(progress, "Menghitung SHA256"),
+                )
+        except (DownloadStopped, KeyboardInterrupt):
+            console.print("Unduhan dihentikan. Jalankan perintah yang sama lagi untuk melanjutkan.", style="yellow")
+            return 130
+        except IsoError as exc:
+            console.print(f"Gagal: {exc}", style="bold red", markup=False)
+            return 1
+        console.print(render.verifications_text("Verifikasi", result.verification.steps))
+        for note in result.notes:
+            console.print(f"  {note}", style="dim", markup=False)
+        if not result.ok:
+            console.print("ISO TIDAK lolos verifikasi; jangan dipakai.", style="bold red")
+            return 1
+        console.print(f"ISO siap di {result.folder}. Salin ke USB Ventoy dengan `distrorelay iso copy {args.distro}`.",
+                      style="green", markup=False)
+        return 0
+
+    candidates = [s for s in saved_releases(args.distro, tools.root)
+                  if (not args.iso_version or s.release.version == args.iso_version)
+                  and (not args.edition or s.release.edition.lower() == args.edition.lower())]
+    if not candidates:
+        version = f" versi {args.iso_version}" if args.iso_version else ""
+        console.print(f"Belum ada unduhan {source.NAME}{version}. "
+                      f"Unduh dulu dengan `distrorelay iso download {args.distro}`.", markup=False)
+        return 1
+    saved = candidates[0]
+    console.print(f"{source.NAME} {saved.release.version} ({saved.release.edition}): {saved.iso_path}", markup=False)
+
+    if args.iso_command == "verify":
+        with _byte_progress(console) as progress:
+            result = manager.reverify(saved, source.KEYS, tools,
+                                      hash_progress=_progress_callback(progress, "Menghitung SHA256"))
+        console.print(render.verifications_text("Verifikasi ulang", result.steps))
+        return 0 if result.ok else 1
+
+    drive, note = _pick_drive(args.drive, volumes, required=True)
+    if drive is None:
+        console.print(note, style="red", markup=False)
+        return 1
+    if note:
+        console.print(note, style="yellow", markup=False)
+    with _byte_progress(console) as progress:
+        steps = manager.copy_to_drive(
+            saved, source.KEYS, tools, drive.root, filesystem=drive.filesystem,
+            progress=_progress_callback(progress, f"Menyalin ke {drive.letter}:"),
+            hash_progress=_progress_callback(progress, "Membaca ulang"),
+        )
+    console.print(render.verifications_text(f"Salin ke USB {drive.letter}:", steps))
+    if not all(step.ok for step in steps):
+        return 1
+    older = [iso for iso in catalog.scan_isos(drive.root, {args.distro: source})
+             if iso.path.name != saved.release.iso_name]
+    if older:
+        console.print("ISO lama yang masih ada di USB (tidak dihapus otomatis): "
+                      + ", ".join(iso.path.name for iso in older), style="dim", markup=False)
+    return 0
+
+
+def _run_shrink_command(args: argparse.Namespace, inner=None, journal_root: Path | None = None) -> int:
+    from rich.console import Console
+
+    from . import render
+    from .format import human_size
+    from .windows import shrink
+    from .windows.journal import incomplete_sessions
+    from .windows.runner import ReadOnlyRunner, SubprocessRunner
+    from .windows.workflow import CONTINUE_WORD, typed
+
+    console = Console()
+    inner = inner or SubprocessRunner()
+    try:
+        with console.status("Membaca partisi C: (menghitung batas shrink bisa ±1 menit)…"):
+            drive = shrink.read_c_drive(ReadOnlyRunner(inner))
+    except shrink.ShrinkError as exc:
+        console.print(str(exc), style="bold red", markup=False)
+        return 1
+    console.print(
+        f"C: {human_size(drive.size)}, kosong {human_size(drive.free)}. Bisa dibebaskan maksimal "
+        f"{human_size(drive.max_shrink)} (batas Windows {human_size(drive.size - drive.size_min)}, "
+        f"dan C: tetap kosong ≥ {human_size(shrink.MIN_FREE_AFTER)}).",
+        markup=False,
+    )
+    if args.size is None:
+        console.print("Pakai --size GB untuk mengecilkan C:.", style="dim")
+        return 0
+    plan = shrink.plan_shrink(drive, int(args.size * shrink.GIB))
+    for line in plan.summary():
+        console.print(f"  {line}", markup=False)
+    if not plan.ok:
+        for problem in plan.problems:
+            console.print(f"  [GAGAL] {problem}", style="bold red", markup=False)
+        return 1
+    unfinished = incomplete_sessions(journal_root)
+    if unfinished:
+        console.print(render.journal_text(unfinished))
+        if not typed(_ask_word(f"Ada sesi yang belum tuntas. Tetap lanjut? Ketik {CONTINUE_WORD}: "), CONTINUE_WORD):
+            return 1
+    console.print(
+        "\nIni MENGUBAH tabel partisi (sama seperti Shrink Volume di Disk Management). Colokkan charger dan jangan "
+        "matikan laptop selama proses. Sebaiknya dicoba di VM dulu.",
+        style="bold yellow",
+    )
+    if not typed(_ask_word(f"Ketik {shrink.SHRINK_WORD} untuk menjalankan, atau Enter untuk batal: "), shrink.SHRINK_WORD):
+        console.print("Dibatalkan. Tidak ada yang diubah.")
+        return 1
+    with console.status("Mengecilkan C: …"):
+        result = shrink.execute(plan, inner, journal_root=journal_root)
+    console.print(result.message, style="green" if result.ok else "bold red", markup=False)
+    return 0 if result.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
@@ -595,6 +820,10 @@ def main(argv: list[str] | None = None) -> int:
             code = _run_kit_command(args)
         elif args.command == "fast-startup":
             code = _run_fast_startup_command(args)
+        elif args.command == "iso":
+            code = _run_iso_command(args)
+        elif args.command == "shrink-c":
+            code = _run_shrink_command(args)
         else:
             from .tui.app import run_tui
 
@@ -608,7 +837,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.elevated_child:
             _pause()
         return code
-    if args.elevated_child and args.command in ("scan", "plan", "backup", "uninstall", "restore", "fast-startup"):
+    if args.elevated_child and args.command in ("scan", "plan", "backup", "uninstall", "restore", "fast-startup",
+                                                "shrink-c"):
         _pause()
     return code
 

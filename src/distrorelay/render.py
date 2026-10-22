@@ -413,3 +413,57 @@ def kit_export_text(result) -> Text:
     for problem in result.problems:
         text.append(f"  [GAGAL] {problem}\n", style="bold red")
     return text
+
+
+# --- ISO manager (M6) ---------------------------------------------------------------------------
+
+_ISO_STATUS_STYLE = {"versi baru tersedia": "bold yellow", "sudah terbaru": "green", "belum ada di USB": "yellow",
+                     "tidak bisa dicek": "red"}
+
+
+def iso_catalog_text(rows, drive=None, drive_note: str | None = None) -> Text:
+    text = Text("Versi terbaru (feed resmi)", style="bold")
+    if drive is not None:
+        text.append(f"  vs USB {drive.letter}: ({drive.label or 'tanpa label'}, {drive.filesystem})\n", style="dim")
+    else:
+        text.append("\n")
+    for row in rows:
+        text.append(f"  {row.name:<11} ", style="bold")
+        if row.latest is None:
+            text.append(f"tidak bisa dicek: {row.error}\n", style="red")
+            continue
+        size = f", {human_size(row.latest.size)}" if row.latest.size else ""
+        text.append(f"{row.latest.version} ({row.latest.edition}{size})")
+        if row.status:
+            text.append(f"  {row.status}", style=_ISO_STATUS_STYLE.get(row.status, ""))
+        text.append("\n")
+        for iso in row.on_drive:
+            text.append(f"      di USB: {iso.path.name}\n", style="dim")
+        saved = row.downloaded_latest
+        if saved is not None:
+            state = "terverifikasi" if saved.verified else "belum lolos verifikasi"
+            text.append(f"      sudah diunduh ({state}): {saved.iso_path}\n", style="dim")
+    if drive_note:
+        text.append(f"\n{drive_note}\n", style="yellow")
+    text.append(
+        "\nUnduh + verifikasi: `distrorelay iso download <distro>`; salin ke Ventoy: `distrorelay iso copy <distro>`. "
+        "ISO lama di USB tidak dihapus otomatis.\n",
+        style="dim",
+    )
+    return text
+
+
+def iso_keys_text(sources, gpgv: str | None, install_hint: str) -> Text:
+    text = Text("Kunci tanda tangan bawaan (hanya ini yang dipercaya)\n", style="bold")
+    for source in sources.values():
+        text.append(f"  {source.NAME}: ", style="bold")
+        exists = source.KEYS.path.is_file()
+        text.append(f"{source.KEYS.path.name}{'' if exists else ' (TIDAK ADA)'}\n", style="" if exists else "bold red")
+        for fingerprint in sorted(source.KEYS.fingerprints):
+            spaced = " ".join(fingerprint[i:i + 4] for i in range(0, 40, 4))
+            text.append(f"      {spaced}\n", style="dim")
+    if gpgv:
+        text.append(f"gpgv: {gpgv}\n", style="green")
+    else:
+        text.append(f"gpgv tidak ditemukan. Pasang GnuPG: {install_hint}\n", style="bold red")
+    return text

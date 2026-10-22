@@ -1,2 +1,6 @@
 # Script Linux harus tetap LF walau di-checkout di Windows.
 *.sh text eol=lf
+# Keyring dan file bertanda tangan harus sama persis per byte (CRLF merusak tanda tangan).
+*.gpg binary
+*.sig binary
+tests/fixtures/iso/** -text
