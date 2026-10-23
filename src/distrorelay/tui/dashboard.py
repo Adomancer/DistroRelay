@@ -86,7 +86,7 @@ class DashboardScreen(Screen):
         if unfinished:
             status.append(
                 f"\nAda {len(unfinished)} sesi (uninstall/pulihkan/shrink) yang belum tuntas: tekan j untuk melihat "
-                "journal, atau u untuk melanjutkan. ",
+                "journal (dan menandainya tuntas kalau sudah dicek), atau u untuk melanjutkan. ",
                 style="bold yellow",
             )
         status.append("s = simpan laporan · u = uninstall · p = pulihkan · j = journal", style="dim")

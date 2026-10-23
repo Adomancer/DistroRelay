@@ -45,6 +45,7 @@ class DistroRelayApp(App):
     #nav { height: auto; padding: 0 1; }
     #nav Button { margin-right: 2; }
     #log { height: auto; max-height: 16; }
+    #attention { height: auto; max-height: 8; }
     """
 
     def __init__(

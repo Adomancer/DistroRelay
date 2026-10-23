@@ -151,6 +151,10 @@ class DiskInventory:
             for p in self.partitions
         }
 
+    def layout_of(self, disk_guids: set[str]) -> set[tuple]:
+        """`layout()` untuk disk dengan GUID ini saja."""
+        return {item for item in self.layout() if item[0] in disk_guids}
+
     def next_partition(self, part: Partition) -> Partition | None:
         """Partisi berikutnya (menurut offset) di disk yang sama."""
         later = [p for p in self.partitions_on(part.disk_number) if p.offset > part.offset]

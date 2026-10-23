@@ -319,10 +319,16 @@ def journal_text(sessions) -> Text:
         else:
             status, style = "berhenti karena gagal", "red"
         if s.resolved_by:
-            status, style = f"{status}, dituntaskan oleh sesi {s.resolved_by}", "dim"
+            how = {
+                "manual": f"ditandai tuntas {s.resolved_by[:16].replace('T', ' ')}",
+                "pemulihan": f"dituntaskan oleh pemulihan {s.resolved_by}",
+            }.get(s.resolved_how, f"dituntaskan oleh sesi {s.resolved_by}")
+            status, style = f"{status}, {how}", "dim"
         text.append(f"  {s.path.stem}  ", style="bold")
         text.append(f"[{_SESSION_KINDS.get(s.kind, s.kind)}] ", style="dim")
         text.append(f"{status}\n", style=style)
+        if s.resolved_how == "manual" and s.marked_resolved is not None and s.marked_resolved.message:
+            text.append(f"      Catatan: {s.marked_resolved.message}\n", style="dim")
         if s.finished and not s.ok and s.end_message:
             text.append(f"      {s.end_message}\n", style="dim")
         if s.backup:

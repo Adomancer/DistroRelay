@@ -29,13 +29,13 @@ from typing import Callable, Iterable, Sequence
 
 from ..format import human_size
 from . import flush
-from .backup import sha256_file, valid_backup_id, verify_backup_dir
+from .backup import creation_checks, sha256_file, valid_backup_id, verify_backup_dir
 from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware, merge_entries
 from .disks import DiskInventory, parse_inventory
 from .esp import norm_path
 from .journal import Journal
 from .nvram import NvramSnapshot
-from .preflight import FAIL, PreflightResult
+from .preflight import FAIL, PreflightResult, system_disks
 from .runner import AllowListRunner, Runner, powershell_args
 from .scanner import ScanReport
 from .signature import Signature, check_signature
@@ -588,6 +588,43 @@ def _execute_steps(
 # --- Gerbang sebelum eksekusi -----------------------------------------------
 
 
+def relevant_disks(inventory: DiskInventory, plan: UninstallPlan) -> set[str] | None:
+    """GUID disk yang layoutnya harus tetap sama: disk Windows/ESP + disk yang partisinya diubah rencana.
+
+    Flashdisk/HDD lain boleh dicolok atau dicabut (dan nomor disk boleh bergeser) tanpa membatalkan backup.
+    None = salah satunya tanpa GUID (mis. disk MBR), jadi pemanggil membandingkan semua disk.
+    """
+    numbers = system_disks(inventory)
+    for action in plan.actions:
+        if action.kind in ("delete-partition", "extend-c"):
+            part = inventory.by_guid(action.data.get("guid"))
+            if part is not None:
+                numbers.add(part.disk_number)
+    disks = [d for d in inventory.disks if d.number in numbers]
+    if not disks or any(not d.guid for d in disks):
+        return None
+    return {d.guid for d in disks}
+
+
+def _layout_changes(
+    plan: UninstallPlan, inventory: DiskInventory | None, backed: DiskInventory | None, manifest: dict
+) -> str | None:
+    """None = layout disk yang relevan sama dengan saat backup; selain itu disk mana yang berbeda."""
+    if inventory is None or backed is None:
+        return "daftar disk tidak terbaca"
+    relevant = relevant_disks(inventory, plan)
+    if relevant is None:
+        return None if manifest.get("layout_fingerprint") == inventory.fingerprint() else "semua disk dibandingkan"
+    before, now = backed.layout_of(relevant), inventory.layout_of(relevant)
+    if before == now:
+        return None
+    names = []
+    for guid in sorted({item[0] for item in before ^ now}):
+        disk = next((d for d in [*inventory.disks, *backed.disks] if d.guid == guid), None)
+        names.append(f"{disk.model or 'disk'} {{{guid}}}" if disk else f"{{{guid}}}")
+    return ", ".join(names)
+
+
 @dataclass
 class GateResult:
     problems: list[str] = field(default_factory=list)
@@ -637,9 +674,20 @@ def check_gate(
         return gate
     failed = [v for v in verify_backup_dir(local) if not v.ok]
     if failed:
+        # Isi folder tidak bisa dipercaya (manifest rusak, file hilang/berubah): cek lain di bawah tidak berarti.
         problems.append(f"Backup lokal tidak lolos verifikasi: {failed[0].name}: {failed[0].message}")
+        return gate
     manifest = json.loads((local / "manifest.json").read_text(encoding="utf-8"))
     gate.manifest = manifest
+    # Sebagian cek saat backup dibuat tidak bisa diulang dari isi folder (BCD store terbaca, entri firmware terbaca
+    # ulang, file ESP yang dikunci), jadi hasilnya wajib hijau.
+    created = creation_checks(local)
+    if created is None:
+        problems.append("Hasil verifikasi saat backup dibuat (verification.json) tidak ada atau rusak; buat backup baru")
+    else:
+        bad = [v for v in created if not v.ok]
+        if bad:
+            problems.append(f"Backup ini gagal verifikasi saat dibuat ({bad[0].name}: {bad[0].message}); buat backup baru")
 
     if not manifest.get("usb_copy"):
         problems.append("Backup ini dibuat dengan --local-only. Eksekusi butuh backup yang punya salinan di drive eksternal")
@@ -658,8 +706,13 @@ def check_gate(
             elif sha256_file(external / "manifest.json") != sha256_file(local / "manifest.json"):
                 problems.append("Salinan eksternal bukan salinan backup lokal ini (manifest berbeda)")
 
-    if report.inventory is None or manifest.get("layout_fingerprint") != report.inventory.fingerprint():
-        problems.append("Layout disk berubah sejak backup dibuat; buat backup baru")
+    try:
+        backed_layout = parse_inventory((local / "partitions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RuntimeError):
+        backed_layout = None
+    changed_disks = _layout_changes(plan, report.inventory, backed_layout, manifest)
+    if changed_disks:
+        problems.append(f"Layout disk berubah sejak backup dibuat ({changed_disks}); buat backup baru")
     if report.esp is None:
         problems.append("ESP tidak terbaca")
     else:
@@ -680,10 +733,6 @@ def check_gate(
     # pernyataan backup data untuk partisi berisi data diminta saat konfirmasi akhir).
     partition_actions = [a for a in plan.actions if a.kind == "delete-partition"]
     if partition_actions:
-        try:
-            backed_layout = parse_inventory((local / "partitions.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError, RuntimeError):
-            backed_layout = None
         for action in partition_actions:
             data = action.data
             backed = backed_layout.by_guid(data.get("guid")) if backed_layout else None

@@ -30,7 +30,15 @@ from distrorelay_linux import backup as linux_backup
 
 from ..format import human_size
 from . import disks, flush, gpt_types
-from .backup import BackupResult, Verification, backup_runner, backups_root, create_backup, verify_backup_dir
+from .backup import (
+    BackupResult,
+    Verification,
+    backup_runner,
+    backups_root,
+    create_backup,
+    creation_checks,
+    verify_backup_dir,
+)
 from .bootrefs import Component, Installation
 from .esp import norm_path
 from .execute import DEV_FLAG_ENV, FAIL_AFTER_ENV, ExecutionResult, GateResult, check_gate, execute_plan, execution_runner
@@ -60,6 +68,7 @@ log = logging.getLogger(__name__)
 CONTINUE_WORD = "LANJUT"
 DELETE_WORD = "HAPUS"
 RESTORE_WORD = "PULIHKAN"
+RESOLVE_WORD = "TUNTAS"
 # Partisi yang mungkin berisi data pribadi (root, home, data, tidak dikenal): backup Linux DistroRelay baru ada di M5,
 # jadi syaratnya pernyataan yang diketik (plan: aturan backup bertingkat).
 DATA_WORD = "DATA SUDAH DIBACKUP"
@@ -84,6 +93,21 @@ REAL_MACHINE_STATEMENTS = {
 def typed(value: str | None, word: str) -> bool:
     """Kata konfirmasi harus persis (peka huruf besar-kecil). Hanya spasi di ujung yang ditoleransi."""
     return (value or "").rstrip() == word
+
+
+def mark_session_resolved(directory: Path, name: str, word: str, note: str) -> str | None:
+    """Tandai sesi yang butuh perhatian (terputus/gagal) sebagai sudah ditangani, kalau TUNTAS diketik persis.
+
+    Untuk sesi yang kondisinya sudah dicek sendiri tanpa ada sesi sejenis yang sukses sesudahnya (mis. uninstall
+    dibatalkan lewat cara lain). Hasilnya masalah, atau None kalau berhasil.
+    """
+    session = next((s for s in incomplete_sessions(directory) if s.path.stem == name), None)
+    if session is None:
+        return f"Sesi {name} tidak ada, atau tidak sedang butuh perhatian"
+    if not typed(word, RESOLVE_WORD):
+        return f"Ketik {RESOLVE_WORD} persis (huruf besar). Tidak ada yang diubah"
+    Journal(session.path).mark_resolved(note)
+    return None
 
 
 class FlowError(RuntimeError):
@@ -168,21 +192,32 @@ class BackupInfo:
     backup_id: str
     created_at: str
     usb_copy: bool  # False = dibuat dengan --local-only, tidak memenuhi syarat eksekusi
+    verified: bool | None = None  # hasil verifikasi saat dibuat (verification.json); None = tidak tercatat
+
+    @property
+    def usable(self) -> bool:
+        """Bisa dipakai untuk uninstall: punya salinan eksternal dan lolos verifikasi saat dibuat."""
+        return self.usb_copy and self.verified is True
 
     def describe(self) -> str:
         where = "lokal + drive eksternal" if self.usb_copy else "lokal saja (--local-only)"
-        return f"{self.backup_id}  ({where})"
+        status = {True: "", False: "  [GAGAL verifikasi saat dibuat]", None: "  [verifikasi tidak tercatat]"}[self.verified]
+        return f"{self.backup_id}  ({where}){status}"
 
 
 def list_backups(root: Path) -> list[BackupInfo]:
-    """Backup lokal yang punya manifest, terbaru dulu. Isinya belum diverifikasi."""
+    """Backup lokal yang punya manifest, terbaru dulu. Isinya belum diverifikasi ulang (itu tugas gerbang)."""
     found = []
     for path in Path(root).glob("*"):
         try:
             manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        found.append(BackupInfo(path.name, str(manifest.get("created_at") or ""), bool(manifest.get("usb_copy"))))
+        if not isinstance(manifest, dict):
+            continue
+        checks = creation_checks(path)
+        found.append(BackupInfo(path.name, str(manifest.get("created_at") or ""), bool(manifest.get("usb_copy")),
+                                None if checks is None else all(c.ok for c in checks)))
     return sorted(found, key=lambda b: b.backup_id, reverse=True)
 
 

@@ -91,7 +91,14 @@ python -m venv .venv
 .venv\Scripts\python.exe -m distrorelay restore --backup <id> --partition disk0-p5 --esp-item EFI\fedora --boot-entry Fedora
 # Lihat sesi eksekusi, termasuk yang terputus di tengah
 .venv\Scripts\python.exe -m distrorelay journal
+# Sesi terputus/gagal yang sudah kamu cek sendiri: tandai tuntas (ketik TUNTAS) supaya tidak lagi meminta LANJUT
+.venv\Scripts\python.exe -m distrorelay journal --tuntaskan 20261022-101500
 ```
+
+Sesi uninstall yang semua item terhapusnya sudah dikembalikan lewat Pulihkan (dan post-check pemulihannya hijau) juga
+otomatis dianggap tuntas. Backup yang gagal salah satu cek saat dibuat (`verification.json`) tidak bisa dipakai untuk
+uninstall. Gerbang hanya membandingkan layout disk Windows dan disk yang partisinya dihapus, jadi flashdisk/HDD lain
+boleh dicolok atau dicabut di antara backup dan uninstall.
 
 Rencana uninstall selalu berurutan supaya laptop tetap bisa boot ke Windows di setiap titik:
 Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus → partisi dihapus (layout disk dicek ulang tepat sebelumnya; hanya script persis
@@ -99,7 +106,8 @@ dari rencana yang boleh memanggil `Remove-Partition`) → (opsional) C: diperlua
 kecuali kamu memilih perluas C:. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
 
 Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroRelay\reports\`, `u` wizard uninstall,
-`p` Pulihkan, `j` journal, `q` keluar. Dashboard sendiri read-only. Banner kuning muncul kalau ada sesi uninstall yang belum tuntas.
+`p` Pulihkan, `j` journal (di sana sesi yang belum tuntas bisa ditandai tuntas), `q` keluar. Dashboard sendiri read-only.
+Banner kuning muncul kalau ada sesi uninstall yang belum tuntas.
 
 Wizard uninstall (`u`) memakai alur yang sama dengan CLI `uninstall`: sesi belum tuntas (ketik `LANJUT`) → mode VM/asli →
 scan + pilih kandidat (spasi = centang, rencana dry-run tampil di sebelahnya) → preflight → backup baru atau pakai yang ada →

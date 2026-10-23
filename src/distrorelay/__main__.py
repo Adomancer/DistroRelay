@@ -70,7 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="nama entri (mis. Fedora), atau nomornya (mis. Boot0007) kalau namanya dipakai lebih dari satu entri")
     restore.add_argument("--partition", action="append", default=[], metavar="ID",
                          help="partisi Linux dari backup (mis. disk0-p5 atau GUID partisinya)")
-    commands.add_parser("journal", help="tampilkan sesi eksekusi, termasuk yang terputus di tengah")
+    journal = commands.add_parser("journal", help="tampilkan sesi eksekusi, termasuk yang terputus di tengah")
+    journal.add_argument("--tuntaskan", metavar="SESI",
+                         help="tandai sesi terputus/gagal sebagai sudah ditangani (ketik TUNTAS), mis. 20261022-101500")
 
     profile = commands.add_parser("profile", help="profil distro-hopping (aplikasi, repo, dotfiles) untuk Linux kit")
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
@@ -278,13 +280,37 @@ def _run_verify_command(args: argparse.Namespace) -> int:
     return 0 if all(c.ok for c in checks) else 1
 
 
-def _run_journal_command(args: argparse.Namespace) -> int:
+def _run_journal_command(args: argparse.Namespace, journal_root: Path | None = None) -> int:
     from rich.console import Console
 
     from . import render
-    from .windows.journal import sessions
+    from .windows.journal import journal_dir, sessions
+    from .windows.workflow import RESOLVE_WORD, mark_session_resolved
 
-    Console().print(render.journal_text(sessions()))
+    console = Console()
+    directory = journal_root or journal_dir()
+    name = getattr(args, "tuntaskan", None)
+    if not name:
+        console.print(render.journal_text(sessions(directory)))
+        return 0
+    found = [s for s in sessions(directory) if s.path.stem == name]
+    if not found:
+        console.print(f"Sesi {name} tidak ada di {directory}.", style="red", markup=False)
+        return 1
+    console.print(render.journal_text(found))
+    if not found[0].needs_attention:
+        console.print("Sesi ini tidak sedang butuh perhatian; tidak ada yang diubah.")
+        return 0
+    console.print(
+        "Tandai tuntas hanya kalau kondisinya sudah kamu cek: scan ulang (`distrorelay scan`), Windows boot normal, dan "
+        "yang setengah jadi sudah dipulihkan atau memang dibiarkan. Sesi ini lalu tidak lagi meminta LANJUT.",
+        style="bold yellow", markup=False,
+    )
+    problem = mark_session_resolved(directory, name, _ask_word(f"Ketik {RESOLVE_WORD}: "), "ditandai lewat CLI")
+    if problem:
+        console.print(problem, style="red", markup=False)
+        return 1
+    console.print(f"Sesi {name} ditandai tuntas.", style="green", markup=False)
     return 0
 
 
@@ -308,8 +334,9 @@ def _run_uninstall_command(args: argparse.Namespace, flow=None) -> int:
         if not flow.acknowledge_unfinished(_ask_word(f"Tetap lanjut? Ketik {CONTINUE_WORD}: ")):
             return 1
     if not args.backup:
-        available = sorted(p.name for p in flow.deps.backups_root.glob("*") if (p / "manifest.json").exists())
-        console.print(f"Wajib --backup <ID>. Backup yang ada: {', '.join(available) or '-'}", style="red")
+        available = [b.describe() for b in flow.existing_backups()]
+        console.print("Wajib --backup <ID>. Backup yang ada: " + ("\n  " + "\n  ".join(available) if available else "-"),
+                      style="red", markup=False)
         return 1
     if not args.select:
         console.print("Wajib --select (lihat kandidat dengan `distrorelay plan`).", style="red")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .backup import Verification
-from .execute import BOOTMGFW, FALLBACK, manifest_hashes
+from .execute import BOOTMGFW, FALLBACK, manifest_hashes, relevant_disks
 from .scanner import ScanReport
 from .uninstall_plan import UninstallPlan
 
@@ -114,8 +114,12 @@ def _layout_checks(plan: UninstallPlan, before: ScanReport, after: ScanReport) -
         ok = grown is not None and grown.size > data["size"]
         checks.append(Verification("C: diperluas", ok, f"{data['size']:,} → {grown.size:,} byte" if ok else "Tidak bertambah"))
     skip = set(deleted) | set(extended)
-    expected = {item for item in before.inventory.layout() if item[1] not in skip}
-    current = {item for item in after.inventory.layout() if item[1] not in extended}
+    # Flashdisk/HDD yang dicolok atau dicabut sesudah scan tidak membuat post-check gagal.
+    relevant = relevant_disks(before.inventory, plan)
+    before_layout = before.inventory.layout() if relevant is None else before.inventory.layout_of(relevant)
+    after_layout = after.inventory.layout() if relevant is None else after.inventory.layout_of(relevant)
+    expected = {item for item in before_layout if item[1] not in skip}
+    current = {item for item in after_layout if item[1] not in extended}
     same = current == expected
     title = "Layout disk lain tidak berubah" if skip else "Layout disk tidak berubah"
     checks.append(Verification(title, same, "Ya" if same else "Berubah!"))

@@ -209,13 +209,28 @@ def verify_backup_dir(directory: Path, hasher: Callable = sha256_file) -> list[V
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [Verification("manifest.json", False, f"Tidak bisa dibaca: {exc}")]
-    files = [BackupFile(**f) for f in manifest.get("files", [])]
+    if not isinstance(manifest, dict):
+        return [Verification("manifest.json", False, "Bukan objek JSON")]
+    try:
+        files = [BackupFile(**f) for f in manifest.get("files", [])]
+    except TypeError as exc:
+        return [Verification("manifest.json", False, f"Daftar file rusak: {exc}")]
     checks = [verify_files(directory, files, "Hash file backup", hasher)]
     if (directory / "esp.zip").exists():
         checks.append(verify_zip(directory / "esp.zip", manifest.get("esp_files", [])))
     if (directory / "esp").is_dir():
         checks.append(verify_tree(directory / "esp", manifest.get("esp_files", []), "Folder esp\\", hasher))
     return checks
+
+
+def creation_checks(directory: Path) -> list[Verification] | None:
+    """Hasil verifikasi saat backup dibuat (verification.json): BCD store terbaca, salinan USB, file ESP yang tidak
+    bisa dibaca, dst. Sebagian cek itu tidak bisa diulang dari isi folder saja. None = tidak ada / rusak."""
+    try:
+        data = json.loads((Path(directory) / "verification.json").read_text(encoding="utf-8"))
+        return [Verification(str(v["name"]), bool(v["ok"]), str(v.get("message", ""))) for v in data]
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 def create_backup(
