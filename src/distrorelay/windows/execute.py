@@ -32,7 +32,7 @@ from . import flush
 from .backup import creation_checks, sha256_file, valid_backup_id, verify_backup_dir
 from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware, merge_entries
 from .disks import DiskInventory, parse_inventory
-from .esp import norm_path
+from .esp import contained_path, norm_path
 from .journal import Journal
 from .nvram import NvramSnapshot
 from .preflight import FAIL, PreflightResult, system_disks
@@ -178,11 +178,10 @@ def safe_esp_path(root: Path, rel: str, *, fallback_target: bool = False) -> Pat
         raise ExecutionError(f"{rel}: folder alat pabrikan, dilindungi")
     if low.startswith("efi\\boot\\") and not (fallback_target and low == FALLBACK.lower()):
         raise ExecutionError(f"{rel}: file fallback firmware hanya boleh diganti lewat langkah pengembalian fallback")
-    base = root.resolve()
-    target = (base / Path(*norm.split("\\"))).resolve()
-    if target == base or base not in target.parents:
-        raise ExecutionError(f"{rel}: berada di luar ESP")
-    return target
+    try:
+        return contained_path(root, norm)
+    except ValueError as exc:
+        raise ExecutionError(f"{rel}: berada di luar ESP") from exc
 
 
 def _rel(root: Path, path: Path) -> str:

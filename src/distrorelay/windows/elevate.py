@@ -21,10 +21,14 @@ def is_admin() -> bool:
 
 def relaunch_command(args: Sequence[str]) -> tuple[str, str]:
     """(program, parameter) untuk menjalankan ulang DistroRelay: `distrorelay.exe <args>` kalau dari .exe
-    (PyInstaller), selain itu `python -m distrorelay <args>`."""
+    (PyInstaller), selain itu `python -P -m distrorelay <args>`.
+
+    `-P`: tanpa ini, `-m` menaruh folder kerja di depan sys.path, jadi `json.py` atau `rich.py` yang kebetulan ada
+    di folder tempat perintah dijalankan (mis. Downloads) ikut di-import oleh proses Administrator.
+    """
     if getattr(sys, "frozen", False):
         return sys.executable, subprocess.list2cmdline(list(args))
-    return sys.executable, subprocess.list2cmdline(["-m", "distrorelay", *args])
+    return sys.executable, subprocess.list2cmdline(["-P", "-m", "distrorelay", *args])
 
 
 def relaunch_as_admin(args: Sequence[str]) -> bool:

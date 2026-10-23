@@ -42,7 +42,8 @@ def test_versions_match():
 
 def test_relaunch_command_from_python_and_from_exe(monkeypatch):
     program, params = elevate.relaunch_command(["--elevated-child", "scan", "--json", "C:\\a b\\x.json"])
-    assert program == sys.executable and params.startswith("-m distrorelay --elevated-child scan")
+    # K-1 (review 2026-10-23): -P = folder kerja tidak masuk sys.path proses Administrator.
+    assert program == sys.executable and params.startswith("-P -m distrorelay --elevated-child scan")
     assert '"C:\\a b\\x.json"' in params
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", "C:\\Tools\\distrorelay.exe")

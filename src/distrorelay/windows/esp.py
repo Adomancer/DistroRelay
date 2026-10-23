@@ -82,6 +82,24 @@ def norm_path(path: str) -> str:
     return path.replace("/", "\\").strip("\\")
 
 
+def contained_path(root: Path, rel: str) -> Path:
+    """Path absolut untuk `rel` (relatif terhadap root ESP) yang pasti berada di bawah `root`.
+
+    ValueError kalau ada bagian '.', '..', atau yang memuat ':' (huruf drive seperti 'C:', atau alternate data stream),
+    atau kalau hasil resolve keluar dari `root`. Dipakai untuk path yang berasal dari file (manifest backup), bukan
+    hanya dari scan.
+    """
+    norm = norm_path(rel)
+    parts = norm.split("\\") if norm else []
+    if not parts or any(p in ("", ".", "..") or ":" in p for p in parts):
+        raise ValueError(f"{rel!r}: path tidak valid")
+    base = Path(root).resolve()
+    target = (base / Path(*parts)).resolve()
+    if target == base or base not in target.parents:
+        raise ValueError(f"{rel!r}: berada di luar {base}")
+    return target
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:

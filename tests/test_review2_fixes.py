@@ -30,7 +30,7 @@ from distrorelay.windows import journal as journal_mod
 from distrorelay.windows import nvram
 from distrorelay.windows.backup import BackupError, backup_runner, create_backup, verify_backup_dir
 from distrorelay.windows.bootrefs import collect_esp_refs
-from distrorelay.windows.esp import EspInventory, scan_tree
+from distrorelay.windows.esp import EspInventory, contained_path, scan_tree
 from distrorelay.windows.iso import DETACHED_ISO, Release, catalog, download, manager
 from distrorelay.windows.journal import Journal, incomplete_sessions, sessions
 from distrorelay.windows.postcheck import post_check
@@ -421,3 +421,42 @@ def test_p7_arch_fallback_syncs_once_then_installs_package_by_package():
         "sudo pacman -S --needed --noconfirm git",
         "sudo pacman -S --needed --noconfirm vlc",
     ]
+
+
+# --- K-1 ada di tests/test_release.py (elevasi dengan -P) ------------------------------------------
+# --- K-2: redirect ke HTTP ditolak -------------------------------------------------------------------
+
+
+def test_k2_redirect_to_plain_http_is_refused():
+    handler = download.HttpsOnlyRedirect()
+    request = urllib.request.Request("https://example.org/releases.json")
+    with pytest.raises(download.DownloadError, match="non-HTTPS"):
+        handler.redirect_request(request, None, 302, "Found", {}, "http://example.org/releases.json")
+    moved = handler.redirect_request(request, None, 302, "Found", {}, "https://mirror.example.org/releases.json")
+    assert moved.full_url == "https://mirror.example.org/releases.json"
+
+
+# --- K-3: path dari manifest backup tidak boleh keluar dari ESP ---------------------------------------
+
+
+def test_k3_contained_path_rules(tmp_path):
+    assert contained_path(tmp_path, "EFI\\fedora\\shimx64.efi") == (tmp_path / "EFI" / "fedora" / "shimx64.efi").resolve()
+    for rel in ("", ".", "EFI\\..\\..\\x", "EFI\\fedora\\C:\\x", "EFI\\a.efi:stream", "EFI/./x"):
+        with pytest.raises(ValueError):
+            contained_path(tmp_path, rel)
+
+
+def test_k3_restore_refuses_manifest_paths_outside_the_esp(tmp_path):
+    backup_dir, esp = tmp_path / "backup", tmp_path / "esp"
+    backup_dir.mkdir()
+    (esp / "EFI").mkdir(parents=True)
+    bad = ["EFI\\fedora\\..\\..\\..\\keluar.efi", "EFI\\fedora\\C:\\keluar.efi"]
+    with zipfile.ZipFile(backup_dir / "esp.zip", "w") as archive:
+        for path in bad:
+            archive.writestr(path.replace("\\", "/"), b"x")
+    digest = hashlib.sha256(b"x").hexdigest()
+    manifest = {"esp_files": [{"path": path, "size": 1, "sha256": digest} for path in bad]}
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    [result] = restore_esp_items(backup_dir, ["EFI\\fedora"], esp)
+    assert not result.ok and "tidak valid" in result.message
+    assert list(tmp_path.rglob("keluar.efi")) == []

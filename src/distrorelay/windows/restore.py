@@ -16,7 +16,7 @@ from . import gpt_types
 from .backup import Verification, sha256_file
 from .bootentries import load_firmware
 from .disks import DiskInventory, Partition
-from .esp import norm_path
+from .esp import contained_path, norm_path
 from .execute import WELL_KNOWN_IDS, _exe
 from .runner import AllowListRunner, Runner
 
@@ -123,13 +123,22 @@ def restore_esp_items(backup_dir: Path, items: Sequence[str], esp_root: Path) ->
             if not chosen:
                 results.append(Verification(label, False, "Tidak ada di backup"))
                 continue
-            pending, conflicts = [], []
+            pending, conflicts, invalid = [], [], []
             for entry in chosen:
-                target = Path(esp_root).joinpath(*entry["path"].split("\\"))
+                # Path dari manifest backup (file di %LOCALAPPDATA%), jadi dicek seperti input dari luar.
+                try:
+                    target = contained_path(esp_root, entry["path"])
+                except ValueError:
+                    invalid.append(entry["path"])
+                    continue
                 if not target.exists():
                     pending.append((entry, target))
                 elif sha256_file(target) != entry["sha256"]:
                     conflicts.append(entry["path"])
+            if invalid:
+                results.append(Verification(label, False, f"Path di manifest tidak valid (keluar dari ESP), tidak ada yang "
+                                                          f"dipulihkan: {invalid[:3]}"))
+                continue
             if conflicts:
                 results.append(Verification(label, False, f"{len(conflicts)} file sudah ada dengan isi berbeda, tidak ditimpa: {conflicts[:3]}"))
                 continue

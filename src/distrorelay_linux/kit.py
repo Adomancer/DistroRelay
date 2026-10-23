@@ -1,5 +1,8 @@
 """Folder kit: profil + kode, dengan manifest SHA256 yang dicek ulang sebelum dipakai.
 
+Cek ini menangkap file yang rusak/terpotong (USB bermasalah, salinan setengah jadi), bukan pengubahan yang disengaja:
+kode yang mengecek berasal dari kit yang sama dan sudah jalan saat cek dilakukan.
+
 Tata letak (dibuat oleh `distrorelay kit export` di Windows):
     <drive>/DistroRelay/kit/            kode + profile.json + packages.json + manifest.json (diganti tiap export)
     <drive>/DistroRelay/linux-backups/  backup dari distro lama (M5), tidak pernah disentuh export

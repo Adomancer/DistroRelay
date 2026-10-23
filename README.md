@@ -138,7 +138,7 @@ flashdisk dan/atau partisi Windows. Di distro baru, kit memasang semuanya lewat 
 
 ```sh
 # Di Linux, dari folder kit (mis. /run/media/$USER/USB/DistroRelay/kit atau /mnt/c/DistroRelay/kit di WSL)
-sh bootstrap.sh info             # distro + isi kit; hash semua file dicek dulu
+sh bootstrap.sh info             # distro + isi kit; hash semua file dicek (cek korupsi)
 sh bootstrap.sh setup --dry-run  # rencana + perintah persisnya, tidak menjalankan apa pun
 sh bootstrap.sh setup            # repo -> paket -> Flathub/Flatpak -> AUR (paru, dengan persetujuan) -> laporan
 ```
@@ -149,6 +149,9 @@ sh bootstrap.sh setup            # repo -> paket -> Flathub/Flatpak -> AUR (paru
   [`src/distrorelay/common/data/packages.toml`](src/distrorelay/common/data/packages.toml) dan bisa ditimpa lewat
   `%LOCALAPPDATA%\DistroRelay\packages.toml`.
 - Kit tidak butuh `pip install`: Python stdlib saja, jalan di Python 3.8+ (`bootstrap.sh` memasang python3 kalau belum ada).
+- Cek hash kit menangkap file yang rusak atau terpotong (mis. USB bermasalah). Itu **bukan bukti keaslian**: hash dicek
+  oleh kode kit itu sendiri, jadi kit yang sengaja diubah tidak bisa terdeteksi dari dalam. Pakai kit hanya dari
+  flashdisk/partisi milikmu.
 - `setup` hanya menambah. Kalau pemasangan paket sekaligus gagal, paketnya dicoba satu per satu supaya ketahuan mana
   yang bermasalah. Dotfiles dipulihkan dari backup terbaru (lihat di bawah); file lama di-rename, bukan ditimpa.
 
@@ -223,7 +226,7 @@ sesudah C: dan bisa langsung dipakai installer Linux.
 ## Rilis `.exe` (M7)
 
 ```powershell
-.venv\Scripts\python.exe -m pip install -e ".[dev,build]"
+.venv\Scripts\python.exe -m pip install -c packaging\constraints.txt -e ".[dev,build]"   # versi sama dengan rilis
 .venv\Scripts\python.exe -m PyInstaller packaging\distrorelay.spec --noconfirm   # -> dist\distrorelay.exe
 dist\distrorelay.exe selftest     # data bawaan, Linux kit (diekspor ke folder sementara), keyring ISO, TUI headless
 ```

@@ -51,6 +51,29 @@ def _check_scheme(url: str, require_https: bool) -> None:
         raise DownloadError(f"Hanya HTTPS yang dipakai: {url}")
 
 
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib bawaan mengikuti redirect dari HTTPS ke HTTP. Isi ISO tetap dicek GPG + SHA256, tapi feed versi lewat
+    HTTP bisa diganti di jalan (mis. diturunkan ke rilis lama yang tanda tangannya masih sah)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.lower().startswith("https://"):
+            raise DownloadError(f"Server mengalihkan {req.full_url} ke alamat non-HTTPS ({newurl}); dibatalkan")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_HTTPS_ONLY = urllib.request.build_opener(HttpsOnlyRedirect)
+
+
+def _open(request: urllib.request.Request, timeout: float, require_https: bool):
+    if not require_https:
+        return urllib.request.urlopen(request, timeout=timeout)
+    response = _HTTPS_ONLY.open(request, timeout=timeout)
+    if not response.geturl().lower().startswith("https://"):
+        response.close()
+        raise DownloadError(f"{request.full_url} berakhir di alamat non-HTTPS ({response.geturl()}); dibatalkan")
+    return response
+
+
 _TRANSIENT_HTTP = (408, 429, 500, 502, 503, 504)
 
 
@@ -67,7 +90,7 @@ def fetch(
     _check_scheme(url, require_https)
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(_request(url), timeout=timeout) as response:
+            with _open(_request(url), timeout, require_https) as response:
                 data = response.read(limit + 1)
             break
         except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
@@ -108,7 +131,7 @@ def download(
     attempt = 0
     while True:
         try:
-            digest = _download_once(url, part, expected_size, progress, should_stop, timeout)
+            digest = _download_once(url, part, expected_size, progress, should_stop, timeout, require_https)
             if digest is not None:
                 part.replace(dest)
                 if on_sha256 is not None:
@@ -136,7 +159,7 @@ def _sha256_of(path: Path) -> "hashlib._Hash":
     return digest
 
 
-def _download_once(url, part: Path, expected_size, progress, should_stop, timeout) -> str | None:
+def _download_once(url, part: Path, expected_size, progress, should_stop, timeout, require_https=True) -> str | None:
     """SHA256 isi file kalau sudah lengkap, None kalau harus diulang dari awal. Error koneksi diteruskan ke
     pemanggil supaya dicoba lagi."""
     have = part.stat().st_size if part.exists() else 0
@@ -146,7 +169,7 @@ def _download_once(url, part: Path, expected_size, progress, should_stop, timeou
     if expected_size is not None and have == expected_size and have:
         return _sha256_of(part).hexdigest()
     try:
-        response = urllib.request.urlopen(_request(url, have), timeout=timeout)
+        response = _open(_request(url, have), timeout, require_https)
     except urllib.error.HTTPError as exc:
         if exc.code == 416 and have:
             # Range di luar ukuran file: .part sudah lengkap, atau file di server berganti. Ulang dari awal
