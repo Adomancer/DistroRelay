@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import sys
@@ -11,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from ..hashing import sha256_file
 from .disks import Partition
 from .runner import Runner
 
@@ -100,14 +100,6 @@ def contained_path(root: Path, rel: str) -> Path:
     return target
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def scan_tree(root: Path) -> tuple[list[EspFile], list[str], list[str]]:
     """Data semua file (ukuran + SHA256), folder, dan file yang tidak bisa dibaca di bawah `root`."""
     files: list[EspFile] = []
@@ -122,7 +114,7 @@ def scan_tree(root: Path) -> tuple[list[EspFile], list[str], list[str]]:
             full = Path(dirpath) / name
             rel = "\\".join((rel_dir / name).parts)
             try:
-                files.append(EspFile(rel, full.stat().st_size, _sha256(full)))
+                files.append(EspFile(rel, full.stat().st_size, sha256_file(full)))
             except OSError as exc:
                 log.warning("ESP: gagal membaca %s: %s", full, exc)
                 unreadable.append(rel)

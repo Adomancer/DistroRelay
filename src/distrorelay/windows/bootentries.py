@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .gpt_types import BRACED_GUID
 from .nvram import NvramSnapshot
 from .runner import Runner
 
@@ -17,7 +18,6 @@ FWBOOTMGR_ID = "{a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}"
 BOOTMGR_ID = "{9dea862c-5cdd-4e70-acc1-f32b344d4795}"
 _ALIASES = {"{fwbootmgr}": FWBOOTMGR_ID, "{bootmgr}": BOOTMGR_ID}
 
-_GUID = re.compile(r"^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$")
 _EFI_PATH = re.compile(r"^\\.*\.efi$", re.IGNORECASE)
 _DEVICE = re.compile(r"^(partition|boot|locate|unknown|ramdisk|vhd|file)=|\\Device\\", re.IGNORECASE)
 _LOCALE = re.compile(r"^[a-z]{2,3}-[A-Za-z]{2,4}$")
@@ -40,7 +40,7 @@ def _canonical_id(value: str | None) -> str | None:
 
 
 def _is_guid(value: str) -> bool:
-    return bool(_GUID.match(value)) or value.strip().lower() in _ALIASES
+    return bool(BRACED_GUID.fullmatch(value)) or value.strip().lower() in _ALIASES
 
 
 @dataclass

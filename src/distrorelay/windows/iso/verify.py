@@ -11,7 +11,6 @@ cukup untuk lolos).
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
@@ -22,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from ...hashing import sha256_file
 from ..runner import CommandResult
 from . import CLEARSIGNED_CHECKSUM, DETACHED_ISO, KeySpec, Release
 
@@ -171,19 +171,6 @@ def parse_checksums(text: str) -> dict[str, str]:
     for name in conflicts:
         found.pop(name, None)
     return found
-
-
-def sha256_file(path: Path, progress: Callable[[int, int], None] | None = None) -> str:
-    digest = hashlib.sha256()
-    total = Path(path).stat().st_size
-    done = 0
-    with open(path, "rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-            done += len(block)
-            if progress is not None:
-                progress(done, total)
-    return digest.hexdigest()
 
 
 # --- Verifikasi rilis -----------------------------------------------------------------------

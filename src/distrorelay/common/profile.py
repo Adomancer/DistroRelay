@@ -119,6 +119,9 @@ class Profile:
             raise ProfileError([f"versi profil {version!r} tidak didukung (yang didukung: {PROFILE_VERSION})"])
         apps = data.get("apps") or {}
         dotfiles = data.get("dotfiles") or {}
+        wrong = [name for name, value in (("apps", apps), ("dotfiles", dotfiles)) if not isinstance(value, dict)]
+        if wrong:
+            raise ProfileError([f"{name}: harus tabel/objek, bukan daftar atau teks" for name in wrong])
         return cls(
             name=data.get("name", "default"),
             native=apps.get("native", []),
@@ -173,6 +176,11 @@ def from_toml(text: str) -> Profile:
     unknown = sorted(set(data) - {"meta", "apps", "repos", "dotfiles", "distro_specific"})
     if unknown:
         raise ProfileError([f"bagian tidak dikenal: {unknown}"])
+    not_tables = [name for name in ("meta", "apps", "repos", "dotfiles", "distro_specific")
+                  if name in data and not isinstance(data[name], dict)]
+    if not_tables:
+        # mis. `repos = ["flathub"]` padahal yang dimaksud `[repos]` + `enable = ["flathub"]`
+        raise ProfileError([f"{name}: harus tabel `[{name}]`, bukan nilai biasa" for name in not_tables])
     meta = data.get("meta", {})
     return Profile.from_dict(
         {

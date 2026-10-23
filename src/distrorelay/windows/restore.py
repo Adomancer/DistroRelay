@@ -17,10 +17,10 @@ from .backup import Verification, sha256_file
 from .bootentries import load_firmware
 from .disks import DiskInventory, Partition
 from .esp import contained_path, norm_path
-from .execute import WELL_KNOWN_IDS, _exe
-from .runner import AllowListRunner, Runner
+from .execute import WELL_KNOWN_IDS
+from .gpt_types import BRACED_GUID, braced_guid
+from .runner import AllowListRunner, Runner, program_name
 
-_GUID = re.compile(r"\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}")
 _EFI_PATH = re.compile(r"^\\efi\\[^\\]+\\.+\.efi$", re.IGNORECASE)
 
 
@@ -30,25 +30,28 @@ def restore_runner(inner: Runner, scripts: frozenset[str] = frozenset()) -> tupl
     created: set[str] = set()
 
     def is_guid(value: str) -> bool:
-        return bool(_GUID.fullmatch(value)) and value.lower() not in WELL_KNOWN_IDS
+        return bool(BRACED_GUID.fullmatch(value)) and value.lower() not in WELL_KNOWN_IDS
+
+    def bcdedit(args) -> bool:
+        return program_name(args) == "bcdedit"
 
     def copy_bootmgr(args):
-        return _exe(args) == "bcdedit" and len(args) == 5 and [a.lower() for a in args[1:4]] == ["/copy", "{bootmgr}", "/d"]
+        return bcdedit(args) and len(args) == 5 and [a.lower() for a in args[1:4]] == ["/copy", "{bootmgr}", "/d"]
 
     def set_path(args):
         return (
-            _exe(args) == "bcdedit" and len(args) == 5 and args[1].lower() == "/set" and is_guid(args[2])
+            bcdedit(args) and len(args) == 5 and args[1].lower() == "/set" and is_guid(args[2])
             and args[2].lower() in created and args[3].lower() == "path" and bool(_EFI_PATH.match(args[4]))
         )
 
     def add_last(args):
         return (
-            _exe(args) == "bcdedit" and len(args) == 6 and [a.lower() for a in args[1:4]] == ["/set", "{fwbootmgr}", "displayorder"]
+            bcdedit(args) and len(args) == 6 and [a.lower() for a in args[1:4]] == ["/set", "{fwbootmgr}", "displayorder"]
             and args[4].lower() in created and args[5].lower() == "/addlast"
         )
 
     def rollback(args):
-        return _exe(args) == "bcdedit" and len(args) == 3 and args[1].lower() == "/delete" and args[2].lower() in created
+        return bcdedit(args) and len(args) == 3 and args[1].lower() == "/delete" and args[2].lower() in created
 
     return AllowListRunner(inner, rules=(copy_bootmgr, set_path, add_last, rollback), scripts=scripts), created
 
@@ -94,10 +97,10 @@ $null = New-Partition -DiskNumber $d.Number -Offset {start} -Size {int(part.size
 
 
 def _braced(value: str | None) -> str:
-    text = (value or "").strip("{}").lower()
-    if not _GUID.fullmatch("{" + text + "}"):
+    guid = braced_guid(value)
+    if guid is None:
         raise ValueError(f"GUID tidak valid: {value!r}")
-    return "{" + text + "}"
+    return guid
 
 
 def protected_esp_item(item: str) -> bool:
@@ -218,7 +221,7 @@ def restore_boot_entry(runner: Runner, created: set[str], record: dict) -> Verif
         return Verification(label, True, "Sudah ada, tidak perlu dibuat ulang")
 
     copied = runner.run(["bcdedit", "/copy", "{bootmgr}", "/d", description])
-    match = _GUID.search(copied.stdout)
+    match = BRACED_GUID.search(copied.stdout)
     if not copied.ok or match is None:
         return Verification(label, False, f"bcdedit /copy gagal: {copied.output() or copied.returncode}")
     new_id = match.group(0).lower()

@@ -853,12 +853,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if not is_admin() and not args.no_elevate and args.command not in _NO_ADMIN_COMMANDS:
         print("DistroRelay butuh hak Administrator untuk membaca ESP, NVRAM, dan header partisi.")
-        print("Membuka jendela Administrator (konfirmasi di dialog UAC)…")
-        if relaunch_as_admin(["--elevated-child", *argv]):
-            return 0
-        print("Permintaan Administrator dibatalkan.")
-        print("Untuk scan terbatas tanpa admin: python -m distrorelay --no-elevate scan")
-        return 1
+        print("Membuka jendela Administrator (konfirmasi di dialog UAC); jendela ini menunggu sampai selesai…")
+        try:
+            code = relaunch_as_admin(["--elevated-child", *argv])
+        except KeyboardInterrupt:
+            print("Berhenti menunggu. Jendela Administrator tetap berjalan.")
+            return 130
+        if code is None:
+            print("Permintaan Administrator dibatalkan.")
+            print("Untuk scan terbatas tanpa admin: python -m distrorelay --no-elevate scan")
+            return 1
+        return code
 
     try:
         if args.command == "scan":

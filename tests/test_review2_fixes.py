@@ -460,3 +460,108 @@ def test_k3_restore_refuses_manifest_paths_outside_the_esp(tmp_path):
     [result] = restore_esp_items(backup_dir, ["EFI\\fedora"], esp)
     assert not result.ok and "tidak valid" in result.message
     assert list(tmp_path.rglob("keluar.efi")) == []
+
+
+# --- B-4: folder GRUB di root ESP memakai nomor slot GPT -------------------------------------------
+
+
+def test_b4_grub_dir_prefix_pointing_at_the_esp_slot_is_not_another_partition(tmp_path):
+    (tmp_path / "grub").mkdir()
+    (tmp_path / "grub" / "core.efi").write_bytes(grub_core_image(prefix="(,gpt1)/grub"))
+    (tmp_path / "grub" / "grub.cfg").write_bytes(b"set timeout=5\n")
+    files, dirs, unreadable = scan_tree(tmp_path)
+    # Windows menomori ESP ini partisi 2 (ada slot GPT kosong di depannya), padahal di tabel GPT ia slot 1.
+    esp = EspInventory("disk0-p2", "guid-esp", "Z:", True, files, dirs, unreadable)
+    [grub_dir] = collect_esp_refs(tmp_path, esp, esp_slot=1).grub_dirs
+    assert [r for r in grub_dir.refs if r.kind == "partnum"] == []
+
+
+# --- B-6: profil dengan tipe yang salah -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", ['repos = ["flathub"]', 'apps = ["firefox"]', 'dotfiles = "~/.bashrc"', 'meta = 1'])
+def test_b6_wrong_table_types_are_profile_errors(text):
+    with pytest.raises(profile_mod.ProfileError):
+        profile_mod.from_toml(text)
+    with pytest.raises(profile_mod.ProfileError):
+        profile_mod.Profile.from_dict({"apps": ["firefox"]})
+
+
+def test_b6_package_map_must_be_a_table():
+    with pytest.raises(packages_mod.PackageMapError):
+        packages_mod.from_dict(["firefox"])
+
+
+# --- B-7: backup Windows yang gagal tidak meninggalkan folder setengah jadi -------------------------
+
+
+def test_b7_failed_backup_leaves_nothing_and_ids_never_collide(tmp_path):
+    bcd, esp_root, deps = laptop_world(tmp_path)
+    report = run_scan(deps())
+    local = tmp_path / "local"
+
+    def backup(now=None):
+        return create_backup(report, backup_runner(bcd, root=local), fake_mount(esp_root), local_root=local,
+                             local_only=True, now=now)
+
+    bcd.failures["bcdedit /export"] = "Akses ditolak"
+    with pytest.raises(BackupError):
+        backup()
+    assert list(local.iterdir()) == []
+    del bcd.failures["bcdedit /export"]
+    now = datetime(2026, 10, 23, 10, 15, 0)
+    first = backup(now)
+    assert first.ok and Path(first.local_dir) == local / "20261023-101500"
+    assert sorted(p.name for p in local.iterdir()) == ["20261023-101500"]
+    with pytest.raises(BackupError, match="sudah ada"):
+        backup(now)
+    (local / ".20261023-101600.tmp").mkdir()  # sisa backup yang sedang/gagal dibuat
+    assert [b.backup_id for b in list_backups(local)] == ["20261023-101500"]
+
+
+# --- B-8: Linux kit tidak meninggalkan file sementara / salinan sensitif yatim ----------------------
+
+
+def test_b8_setup_dry_run_creates_no_workdir_and_real_run_removes_it(tmp_path, monkeypatch):
+    kit_dir = export_kit_for_test(tmp_path).kit_dir
+    monkeypatch.setattr("distrorelay_linux.distro.read", lambda: detect(OS_RELEASE["fedora"]))
+    monkeypatch.setattr("distrorelay_linux.cli.os.geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr("distrorelay_linux.kit.default_search_roots", lambda user=None: [])
+    monkeypatch.setattr(provision, "new_workdir", lambda: pytest.fail("dry-run tidak boleh membuat folder kerja"))
+    assert linux_cli.main(["--kit", str(kit_dir), "setup", "--dry-run", "--backup", "none"]) == 0
+    workdir = tmp_path / "kerja"
+    monkeypatch.setattr(provision, "new_workdir", lambda: (workdir.mkdir(), str(workdir))[1])
+    monkeypatch.setattr(linux_cli, "_setup", lambda *args: 0)  # tanpa menjalankan dnf sungguhan
+    assert linux_cli.main(["--kit", str(kit_dir), "setup", "--backup", "none"]) == 0
+    assert not workdir.exists()
+
+
+def test_b8_failed_backup_removes_its_sensitive_copy_on_the_other_usb(tmp_path, monkeypatch):
+    other = tmp_path / "usb2" / "DistroRelay" / "linux-backups"
+    monkeypatch.setattr(linux_backup, "verify", lambda path, **kw: ["rusak"])
+    with pytest.raises(linux_backup.BackupError):
+        run_backup(tmp_path, runner=linux_runner(usb=False), usb_backup_dirs=lambda: [other])
+    assert not other.exists() or list(other.rglob("*")) == []
+
+
+# --- B-9: kode keluar jendela Administrator diteruskan -------------------------------------------------
+
+
+def test_b9_exit_code_of_the_elevated_window_is_returned(monkeypatch):
+    from distrorelay import __main__ as main_mod
+
+    monkeypatch.setattr("distrorelay.windows.elevate.is_admin", lambda: False)
+    monkeypatch.setattr(main_mod, "setup_logging", lambda verbose: None)  # jangan menulis ke %LOCALAPPDATA% asli
+    monkeypatch.setattr(main_mod.sys, "platform", "win32")
+    for returned, expected in ((3, 3), (0, 0), (None, 1)):
+        monkeypatch.setattr("distrorelay.windows.elevate.relaunch_as_admin", lambda args, value=returned: value)
+        assert main_mod.main(["scan"]) == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="struktur Win32")
+def test_b9_shellexecuteinfo_has_the_documented_size():
+    import ctypes
+
+    from distrorelay.windows.elevate import _shell_execute_info
+
+    assert ctypes.sizeof(_shell_execute_info()) == (112 if ctypes.sizeof(ctypes.c_void_p) == 8 else 60)

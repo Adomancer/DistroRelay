@@ -81,6 +81,8 @@ class PackageMap:
 
 
 def from_dict(data: dict) -> PackageMap:
+    if data is not None and not isinstance(data, dict):
+        raise PackageMapError("peta paket harus tabel: nama logis -> distro -> daftar paket")
     problems = []
     entries: dict[str, dict[str, list[str]]] = {}
     for name, value in (data or {}).items():

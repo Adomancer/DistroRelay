@@ -37,6 +37,7 @@ from .backup import (
     backups_root,
     create_backup,
     creation_checks,
+    valid_backup_id,
     verify_backup_dir,
 )
 from .bootrefs import Component, Installation
@@ -209,6 +210,8 @@ def list_backups(root: Path) -> list[BackupInfo]:
     """Backup lokal yang punya manifest, terbaru dulu. Isinya belum diverifikasi ulang (itu tugas gerbang)."""
     found = []
     for path in Path(root).glob("*"):
+        if not valid_backup_id(path.name):  # mis. .20261023-101500.tmp = backup yang sedang/gagal dibuat
+            continue
         try:
             manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -661,6 +664,7 @@ class RestoreFlow:
         self.journal: Journal | None = None  # journal pemulihan terakhir
         self._ticket: RestoreTicket | None = None
         self._generation = 0
+        self._mutated = False  # pemulihan terakhir sempat menjalankan perintah/menulis (bukan ditolak cek awal)
 
     def _changed(self) -> None:
         self._generation += 1
@@ -839,7 +843,7 @@ class RestoreFlow:
              "entries": [entry_label(r) for r in self.entries], "partitions": [p.id for p in self.partitions]},
         )
         results: list[Verification] = []
-        self._mutated = False  # ada perintah/penulisan yang benar-benar dijalankan (bukan ditolak cek awal)
+        self._mutated = False
         steps: list[tuple[str, str, Callable[[], list[Verification]]]] = []
         restored: list[tuple[disks.Partition, str]] = []  # (partisi di backup, GUID disk)
         for part in self.partitions:

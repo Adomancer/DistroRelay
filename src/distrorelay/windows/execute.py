@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -36,7 +35,8 @@ from .esp import contained_path, norm_path
 from .journal import Journal
 from .nvram import NvramSnapshot
 from .preflight import FAIL, PreflightResult, system_disks
-from .runner import AllowListRunner, Runner, powershell_args
+from .gpt_types import braced_guid
+from .runner import AllowListRunner, Runner, powershell_args, program_name
 from .scanner import ScanReport
 from .signature import Signature, check_signature
 from .stopping import StopSignal
@@ -79,19 +79,16 @@ $ErrorActionPreference = 'Stop'
 $null = Suspend-BitLocker -MountPoint 'C:' -RebootCount 1
 """
 
-_GUID_TEXT = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
-
 class ExecutionError(RuntimeError):
     pass
 
 
 def _guid(value) -> str:
     """GUID dari data rencana, divalidasi sebelum ditempel ke script PowerShell."""
-    text = str(value or "").strip("{}").lower()
-    if not _GUID_TEXT.match(text):
+    guid = braced_guid(value)
+    if guid is None:
         raise ExecutionError(f"GUID tidak valid di rencana: {value!r}")
-    return "{" + text + "}"
+    return guid
 
 
 def partition_delete_script(data: dict) -> str:
@@ -144,10 +141,6 @@ class SimulatedCrash(RuntimeError):
     """Crash buatan untuk test VM: langkah sudah dijalankan tapi belum dicatat selesai di journal."""
 
 
-def _exe(args: Sequence[str]) -> str:
-    return Path(args[0]).stem.lower() if args else ""
-
-
 def execution_runner(inner: Runner, plan: UninstallPlan) -> AllowListRunner:
     """Runner tahap eksekusi: read-only + perintah pengubah yang persis ada di rencana."""
     allowed_ids = {
@@ -155,10 +148,11 @@ def execution_runner(inner: Runner, plan: UninstallPlan) -> AllowListRunner:
     } - WELL_KNOWN_IDS
 
     def set_windows_first(args: Sequence[str]) -> bool:
-        return _exe(args) == "bcdedit" and [a.lower() for a in args[1:]] == SET_WINDOWS_FIRST[1:]
+        return program_name(args) == "bcdedit" and [a.lower() for a in args[1:]] == SET_WINDOWS_FIRST[1:]
 
     def delete_planned_entry(args: Sequence[str]) -> bool:
-        return _exe(args) == "bcdedit" and len(args) == 3 and args[1].lower() == "/delete" and args[2].lower() in allowed_ids
+        return (program_name(args) == "bcdedit" and len(args) == 3 and args[1].lower() == "/delete"
+                and args[2].lower() in allowed_ids)
 
     return AllowListRunner(
         inner,

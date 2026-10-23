@@ -297,6 +297,14 @@ def create_backup(
         staging.rename(final)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
+        if sensitive_info and sensitive_info["location"] != "here":
+            # Salinan terenkripsi di kit USB lain milik backup yang batal ini: jangan ditinggal yatim.
+            elsewhere = Path(sensitive_info["location"])
+            (elsewhere / SENSITIVE).unlink(missing_ok=True)
+            try:
+                elsewhere.rmdir()
+            except OSError:
+                pass
         raise
     return BackupResult(final, manifest, notes)
 

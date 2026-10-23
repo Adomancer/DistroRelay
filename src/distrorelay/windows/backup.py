@@ -26,12 +26,13 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .. import __version__
+from ..hashing import sha256_file
 from ..paths import app_data_dir
 from .bootentries import parse_firmware
 from .disks import Partition, parse_inventory
 from .esp import MountedEsp
 from .nvram import snapshot_from_raw
-from .runner import AllowListRunner, Runner
+from .runner import AllowListRunner, Runner, program_name
 from .preflight import M2A_CMDLETS
 from .scanner import ScanReport
 from .uncached import sha256_uncached
@@ -46,9 +47,11 @@ BACKUP_ID = re.compile(r"^\d{8}-\d{6}$")
 _LOCKED_ESP_FILE = re.compile(r"^efi\\microsoft\\boot\\bcd(\.log\d*)?$", re.IGNORECASE)
 
 
+_CHUNK = 1024 * 1024
+
+
 def valid_backup_id(backup_id: str | None) -> bool:
     return bool(backup_id) and BACKUP_ID.fullmatch(backup_id) is not None
-_CHUNK = 1024 * 1024
 
 
 class BackupError(RuntimeError):
@@ -64,7 +67,7 @@ def export_rule(root: Path) -> Callable[[Sequence[str]], bool]:
     allowed = Path(root).resolve()
 
     def rule(args: Sequence[str]) -> bool:
-        if len(args) != 3 or Path(args[0]).stem.lower() != "bcdedit" or args[1].lower() != "/export":
+        if len(args) != 3 or program_name(args) != "bcdedit" or args[1].lower() != "/export":
             return False
         target = Path(args[2]).resolve()
         return allowed == target or allowed in target.parents
@@ -105,14 +108,6 @@ class BackupResult:
     @property
     def ok(self) -> bool:
         return bool(self.verifications) and all(v.ok for v in self.verifications)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def zip_tree(root: Path, zip_path: Path, opener: Callable = open) -> tuple[list[dict], list[str]]:
@@ -255,10 +250,45 @@ def create_backup(
         raise BackupError("ESP tidak ditemukan")
 
     backup_id = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    local = (local_root or backups_root()) / backup_id
-    local.mkdir(parents=True, exist_ok=False)
-    result = BackupResult(backup_id, str(local), None, local_only=local_only)
+    root = local_root or backups_root()
+    final = root / backup_id
+    if final.exists():
+        raise BackupError(f"Backup {backup_id} sudah ada; tunggu sebentar lalu ulangi")
+    # Dibangun di folder sementara dan baru diberi nama ID setelah selesai: backup yang gagal di tengah tidak
+    # meninggalkan folder setengah jadi (esp.zip ratusan MB) yang tampak seperti backup.
+    local = root / f".{backup_id}.tmp"
+    shutil.rmtree(local, ignore_errors=True)
+    local.mkdir(parents=True)
+    result = BackupResult(backup_id, str(final), None, local_only=local_only)
+    try:
+        _write_backup(report, runner, mount_esp, esp_part, local, result, usb_root=usb_root, local_only=local_only,
+                      opener=opener, say=say, now=now)
+    except BaseException:
+        shutil.rmtree(local, ignore_errors=True)
+        raise
+    try:
+        local.rename(final)
+    except OSError as exc:
+        raise BackupError(f"Backup selesai di {local}, tapi tidak bisa diberi nama {backup_id}: {exc}") from exc
+    return result
 
+
+def _write_backup(
+    report: ScanReport,
+    runner: Runner,
+    mount_esp: Callable[[Runner, Partition], AbstractContextManager[MountedEsp]],
+    esp_part: Partition,
+    local: Path,
+    result: BackupResult,
+    *,
+    usb_root: Path | None,
+    local_only: bool,
+    opener: Callable,
+    say: Callable[[str], None],
+    now: datetime | None,
+) -> None:
+    """Isi folder backup `local` (masih sementara) dan verifikasinya; hasilnya dicatat di `result`."""
+    backup_id = result.backup_id
     say("Menyalin seluruh isi ESP ke esp.zip…")
     with mount_esp(runner, esp_part) as mounted:
         result.esp_files, result.skipped = zip_tree(mounted.root, local / "esp.zip", opener)
@@ -370,4 +400,3 @@ def create_backup(
     (local / "verification.json").write_text(
         json.dumps([dataclasses.asdict(v) for v in checks], indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    return result

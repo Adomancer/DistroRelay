@@ -14,9 +14,8 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
-from typing import Callable
 
-Progress = Callable[[int, int], None]
+from ..hashing import Progress, sha256_file
 
 _CHUNK = 1024 * 1024
 _GENERIC_READ = 0x80000000
@@ -27,18 +26,6 @@ _FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
 _MEM_COMMIT_RESERVE = 0x1000 | 0x2000
 _MEM_RELEASE = 0x8000
 _PAGE_READWRITE = 0x04
-
-
-def _sha256_cached(path: Path, progress: Progress | None = None) -> str:
-    digest = hashlib.sha256()
-    total, done = Path(path).stat().st_size, 0
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK), b""):
-            digest.update(chunk)
-            done += len(chunk)
-            if progress is not None:
-                progress(done, total)
-    return digest.hexdigest()
 
 
 def _sha256_no_buffering(path: Path, progress: Progress | None = None) -> str:
@@ -92,4 +79,4 @@ def sha256_uncached(path: Path, progress: Progress | None = None) -> str:
     """SHA256 isi file sebagaimana tersimpan di perangkat. OSError kalau tidak bisa dibaca langsung dari perangkat."""
     if sys.platform == "win32":
         return _sha256_no_buffering(Path(path), progress)
-    return _sha256_cached(Path(path), progress)
+    return sha256_file(Path(path), progress)

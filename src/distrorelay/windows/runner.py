@@ -93,6 +93,11 @@ def _exe_name(arg0: str) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
+def program_name(args: Sequence[str]) -> str:
+    """'C:\\Windows\\System32\\bcdedit.exe /delete …' -> 'bcdedit'; '' untuk perintah kosong. Untuk aturan allowlist."""
+    return _exe_name(args[0]) if args else ""
+
+
 def console_encoding() -> str:
     """Encoding output program konsol Windows yang di-redirect (OEM code page)."""
     if sys.platform == "win32":

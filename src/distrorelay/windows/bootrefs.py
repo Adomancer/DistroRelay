@@ -497,7 +497,7 @@ def collect_esp_refs(root: Path, esp: EspInventory, esp_slot: int | None = None)
                 prefix, embedded = grub_embedded(_read(root, f.path, limit=16 * 1024 * 1024) or b"")
                 if prefix:
                     core_prefixes.append(f"{f.path}: {prefix}")
-                    grub_refs.extend(_prefix_refs(prefix, f.path, esp.partition_number))
+                    grub_refs.extend(_prefix_refs(prefix, f.path, esp_number))
                 if embedded:
                     grub_refs.extend(refs_from_grub_cfg(embedded, f"{f.path} (config tertanam)"))
         refs.grub_dirs.append(

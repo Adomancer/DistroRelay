@@ -14,13 +14,13 @@ di Disk Management).
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from ..format import human_size
+from .gpt_types import BRACED_GUID
 from .journal import Journal, journal_dir
 from .runner import AllowListRunner, Runner, powershell_args
 from .stopping import StopSignal
@@ -76,7 +76,6 @@ $after = Get-Partition -DiskNumber __DISK__ -PartitionNumber __NUMBER__
 ConvertTo-Json -Compress -InputObject @{ Guid = [string]$after.Guid; Offset = $after.Offset; Size = $after.Size }
 """
 
-_GUID = re.compile(r"^\{[0-9a-fA-F-]{36}\}$")
 
 
 class ShrinkError(RuntimeError):
@@ -121,7 +120,7 @@ def parse_query(text: str) -> CDrive:
         )
     except (ValueError, TypeError, KeyError) as exc:
         raise ShrinkError(f"Info partisi C: tidak terbaca: {exc}") from exc
-    if not _GUID.match(drive.guid):
+    if not BRACED_GUID.fullmatch(drive.guid):
         raise ShrinkError(f"GUID partisi C: tidak dikenali ({drive.guid!r}); disk bukan GPT?")
     return drive
 
