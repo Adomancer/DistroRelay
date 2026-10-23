@@ -242,17 +242,17 @@ def test_restore_partition_refused_when_space_is_used_or_it_still_exists(tmp_pat
 
 
 def test_cli_restore_partition(tmp_path, monkeypatch):
-    from distrorelay.__main__ import _run_restore_command
+    from distrorelay.cli.uninstall import cmd_restore
 
     flow, bcd = uninstalled(tmp_path)
     monkeypatch.setattr("builtins.input", lambda prompt="": "PULIHKAN")
     args = argparse.Namespace(backup=flow.backup_id, esp_item=[], boot_entry=[], partition=["disk0-p5"])
-    assert _run_restore_command(args, flow=RestoreFlow(flow.deps)) == 0
+    assert cmd_restore(args, flow=RestoreFlow(flow.deps)) == 0
     assert any(p["Offset"] == 509961306112 for p in bcd.disks["Partitions"])
 
 
 def test_cli_uninstall_asks_for_the_partition_id(tmp_path, monkeypatch):
-    from distrorelay.__main__ import _run_uninstall_command
+    from distrorelay.cli.uninstall import cmd_uninstall
     from distrorelay.windows.backup import backup_runner, create_backup
 
     flow, bcd, ext = make_flow(tmp_path)
@@ -262,7 +262,7 @@ def test_cli_uninstall_asks_for_the_partition_id(tmp_path, monkeypatch):
     answers = iter(["vm", "ya", "disk0-p4"])  # ID salah -> berhenti sebelum HAPUS ditanyakan
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     args = argparse.Namespace(backup=backup.backup_id, select=INSTALLATIONS)
-    assert _run_uninstall_command(args, flow=flow) == 1
+    assert cmd_uninstall(args, flow=flow) == 1
     assert bcd.partition(P5_GUID) is not None
 
     answers = iter(["vm", "ya", "disk0-p5", "HAPUS"])
@@ -272,5 +272,5 @@ def test_cli_uninstall_asks_for_the_partition_id(tmp_path, monkeypatch):
     backup = create_backup(report, backup_runner(bcd2, root=tmp_path / "kedua" / "local"), flow2.deps.mount_esp,
                            local_root=tmp_path / "kedua" / "local", usb_root=ext2)
     args = argparse.Namespace(backup=backup.backup_id, select=INSTALLATIONS)
-    assert _run_uninstall_command(args, flow=flow2) == 0
+    assert cmd_uninstall(args, flow=flow2) == 0
     assert bcd2.partition(P5_GUID) is None

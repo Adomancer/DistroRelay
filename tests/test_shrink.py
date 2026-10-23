@@ -122,13 +122,13 @@ def test_other_resize_scripts_are_refused(tmp_path):
 
 
 def run_cli(monkeypatch, tmp_path, size, answers):
-    from distrorelay import __main__ as cli
+    from distrorelay.cli import system as cli
 
     replies = iter(answers)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(replies))
     plan_size = shrink.plan_shrink(drive(), int(size * GIB)).new_size if size else None
     runner = make_runner(after_size=plan_size)
-    code = cli._run_shrink_command(Namespace(size=size), inner=runner, journal_root=tmp_path)
+    code = cli.cmd_shrink(Namespace(size=size), inner=runner, journal_root=tmp_path)
     return code, runner
 
 

@@ -337,18 +337,18 @@ def test_merge_update_only_adds_and_respects_exclude():
 
 
 def test_windows_profile_import(tmp_path, monkeypatch, capsys):
-    from distrorelay.__main__ import _run_profile_command
+    from distrorelay.cli.linux import cmd_profile
 
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
     kit, result = run_backup(tmp_path)
-    assert _run_profile_command(argparse.Namespace(profile_command="init", force=False)) == 0
+    assert cmd_profile(argparse.Namespace(profile_command="init", force=False)) == 0
     path = kit_export.profile_path()
     before = path.read_text(encoding="utf-8")
 
     def run(directory, yes=True):
-        return _run_profile_command(argparse.Namespace(profile_command="import", directory=str(directory), yes=yes))
+        return cmd_profile(argparse.Namespace(profile_command="import", directory=str(directory), yes=yes))
 
-    monkeypatch.setattr("distrorelay.__main__._ask", lambda prompt: "tidak")
+    monkeypatch.setattr("distrorelay.cli.prompts.ask", lambda prompt: "tidak")
     assert run(result.path, yes=False) == 1 and path.read_text(encoding="utf-8") == before
     assert run(result.path) == 0
     profile = kit_export.load_profile(path)

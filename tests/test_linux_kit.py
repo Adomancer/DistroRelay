@@ -311,17 +311,17 @@ def test_bootstrap_is_valid_posix_sh(tmp_path):
 
 
 def test_windows_cli_profile_and_kit(tmp_path, monkeypatch, capsys):
-    from distrorelay.__main__ import _run_kit_command, _run_profile_command
+    from distrorelay.cli.linux import cmd_kit, cmd_profile
     import argparse
 
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
-    assert _run_profile_command(argparse.Namespace(profile_command="init", force=False)) == 0
-    assert _run_profile_command(argparse.Namespace(profile_command="init", force=False)) == 1  # sudah ada
-    assert _run_profile_command(argparse.Namespace(profile_command="show")) == 0
+    assert cmd_profile(argparse.Namespace(profile_command="init", force=False)) == 0
+    assert cmd_profile(argparse.Namespace(profile_command="init", force=False)) == 1  # sudah ada
+    assert cmd_profile(argparse.Namespace(profile_command="show")) == 0
     out = capsys.readouterr().out
     assert "Profil 'laptop-utama'" in out and "Arch: firefox git neovim vlc base-devel" in out
 
     kit_dir = export(tmp_path / "usb").kit_dir
-    assert _run_kit_command(argparse.Namespace(kit_command="verify", directory=str(kit_dir))) == 0
+    assert cmd_kit(argparse.Namespace(kit_command="verify", directory=str(kit_dir))) == 0
     (kit_dir / "packages.json").write_text("{}")
-    assert _run_kit_command(argparse.Namespace(kit_command="verify", directory=str(kit_dir))) == 1
+    assert cmd_kit(argparse.Namespace(kit_command="verify", directory=str(kit_dir))) == 1

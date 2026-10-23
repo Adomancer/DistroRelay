@@ -249,7 +249,9 @@ packaging/                spec PyInstaller + launcher untuk distrorelay.exe
 src/distrorelay_linux/    Linux kit (stdlib, Python 3.8+): cli, distro, pm, provision, dotfiles, backup, kit, bootstrap.sh
 src/distrorelay/common/   profil + peta paket, dipakai Windows dan Linux kit
 src/distrorelay/
-├─ __main__.py            CLI & elevasi admin
+├─ __main__.py            entry point: logging, elevasi admin, pilih perintah
+├─ cli/                   satu modul per perintah (scan, backup, uninstall/restore/journal, Linux kit, iso, shrink)
+├─ hashing.py             SHA256 file per 1 MiB (dipakai semua modul Windows)
 ├─ selftest.py            cek isi paket/.exe tanpa mengubah sistem
 ├─ render.py              tampilan bersama untuk CLI dan TUI
 ├─ tui/                   dashboard + wizard uninstall, Pulihkan, journal (Textual; hanya lewat workflow)

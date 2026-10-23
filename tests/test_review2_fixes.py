@@ -223,13 +223,13 @@ def test_b5_extended_c_can_only_be_resolved_by_hand(tmp_path):
 
 
 def test_b5_cli_marks_a_session_resolved(tmp_path, monkeypatch):
-    from distrorelay.__main__ import _run_journal_command
+    from distrorelay.cli.uninstall import cmd_journal
 
     _cut_uninstall(tmp_path)
-    monkeypatch.setattr("distrorelay.__main__._ask_word", lambda prompt: "TUNTAS")
-    assert _run_journal_command(SimpleNamespace(tuntaskan="20261022-100000"), journal_root=tmp_path) == 0
+    monkeypatch.setattr("distrorelay.cli.prompts.ask_word", lambda prompt: "TUNTAS")
+    assert cmd_journal(SimpleNamespace(tuntaskan="20261022-100000"), journal_root=tmp_path) == 0
     assert incomplete_sessions(tmp_path) == []
-    assert _run_journal_command(SimpleNamespace(tuntaskan="20261022-999999"), journal_root=tmp_path) == 1
+    assert cmd_journal(SimpleNamespace(tuntaskan="20261022-999999"), journal_root=tmp_path) == 1
 
 
 def test_b5_tui_journal_screen_marks_a_session_resolved(tmp_path):

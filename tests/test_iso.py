@@ -134,7 +134,7 @@ def test_release_rejects_unsafe_names_and_plain_http():
 
 
 def test_parser_choices_match_sources():
-    from distrorelay.__main__ import ISO_DISTROS
+    from distrorelay.cli.parser import ISO_DISTROS
 
     assert set(ISO_DISTROS) == set(sources.SOURCES)
 
@@ -603,38 +603,38 @@ def iso_args(command, distro=None, **extra):
 
 
 def test_cli_check_without_ventoy(tmp_path, capsys):
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     tools = manager.Tools(gpgv="", fetch=fake_fetch(FEEDS), root=tmp_path)
-    code = _run_iso_command(iso_args("check"), tools=tools, volumes=lambda: [])
+    code = cmd_iso(iso_args("check"), tools=tools, volumes=lambda: [])
     out = capsys.readouterr().out
     assert code == 0 and "44 (Workstation" in out and "tidak terdeteksi" in out
 
 
 def test_cli_download_needs_gpgv(tmp_path, capsys):
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     tools = manager.Tools(gpgv="", fetch=fake_fetch(FEEDS), root=tmp_path)
-    assert _run_iso_command(iso_args("download", "mint"), tools=tools) == 1
+    assert cmd_iso(iso_args("download", "mint"), tools=tools) == 1
     assert "winget install GnuPG.GnuPG" in capsys.readouterr().out
 
 
 @needs_gpgv
 def test_cli_download_real_mint_signature_but_wrong_iso_is_rejected(tmp_path, capsys):
     """Tanda tangan sha256sum.txt Mint asli lolos dengan kunci bawaan, tapi ISO palsu ditolak SHA256-nya."""
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     files = {**FEEDS, mint.BASE + "22.3/sha256sum.txt.gpg": fixture("sha256sum.txt.gpg")}
     tools = manager.Tools(gpgv=GPGV, fetch=fake_fetch(files), download=FakeDownload(b"bukan ISO asli"), root=tmp_path)
-    code = _run_iso_command(iso_args("download", "mint"), tools=tools)
+    code = cmd_iso(iso_args("download", "mint"), tools=tools)
     out = capsys.readouterr().out
     assert code == 1 and "Linux Mint ISO Signing Key" in out and "TIDAK lolos" in out
     assert (tmp_path / "mint" / "22.3-cinnamon" / "linuxmint-22.3-cinnamon-64bit.iso.rejected").exists()
 
 
 def test_cli_copy_without_download(tmp_path, capsys):
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     tools = manager.Tools(gpgv="gpgv", fetch=fake_fetch(FEEDS), root=tmp_path)
-    assert _run_iso_command(iso_args("copy", "fedora"), tools=tools, volumes=lambda: []) == 1
+    assert cmd_iso(iso_args("copy", "fedora"), tools=tools, volumes=lambda: []) == 1
     assert "Belum ada unduhan" in capsys.readouterr().out
