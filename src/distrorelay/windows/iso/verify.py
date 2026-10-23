@@ -250,8 +250,10 @@ def verify_release(
     gpgv: str,
     run: GpgvRun = run_gpgv,
     progress: Callable[[int, int], None] | None = None,
+    known_sha256: str | None = None,
 ) -> Verification:
-    """Dua lapis lengkap atas ISO yang sudah terunduh."""
+    """Dua lapis lengkap atas ISO yang sudah terunduh. `known_sha256` = SHA256 yang dihitung sambil mengunduh file
+    itu barusan (tidak dibaca ulang)."""
     result = signed_sha256(release, folder, keys, gpgv=gpgv, run=run)
     if not result.ok:
         return result
@@ -266,7 +268,7 @@ def verify_release(
     if not result.sha256:
         result.steps.append(Step("SHA256 ISO", False, "tidak ada nilai SHA256 resmi untuk dibandingkan"))
         return result
-    actual = sha256_file(iso, progress)
+    actual = known_sha256.lower() if known_sha256 else sha256_file(iso, progress)
     match = actual == result.sha256
     result.steps.append(Step("SHA256 ISO", match, actual if match else f"{actual} ≠ resmi {result.sha256}"))
     result.iso_bad = not match

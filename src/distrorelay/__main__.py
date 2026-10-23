@@ -675,9 +675,10 @@ def _run_iso_command(args: argparse.Namespace, tools=None, volumes=None) -> int:
         if drive is None and args.drive:
             console.print(note, style="red", markup=False)
             return 1
-        with console.status("Mengecek versi terbaru…"):
+        with console.status("Mengecek versi terbaru…") as status:
             rows = catalog.check(sources.SOURCES, tools.fetch if tools else fetch,
-                                 drive=drive.root if drive else None, downloads_root=tools.root if tools else None)
+                                 drive=drive.root if drive else None, downloads_root=tools.root if tools else None,
+                                 progress=lambda left: status.update(f"Mengecek versi terbaru… menunggu {', '.join(left)}"))
         console.print(render.iso_catalog_text(rows, drive, note))
         return 0 if all(row.latest is not None for row in rows) else 1
 

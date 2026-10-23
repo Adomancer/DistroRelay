@@ -75,7 +75,8 @@ def make_runner(after_size=None, fail=False):
     runner.add("ps:shrink-query", json.dumps(BEFORE))
 
     def resized(args):
-        runner.add("ps:shrink-query", json.dumps({**BEFORE, "Size": after_size}))
+        runner.add("ps:shrink-after", json.dumps({key: BEFORE[key] for key in ("DiskNumber", "Guid", "Offset")}
+                                                 | {"Size": after_size}))
 
     runner.add("ps:shrink-c", "{}", returncode=1 if fail else 0, stderr="Resize gagal" if fail else "",
                effect=None if fail else resized)
@@ -89,6 +90,8 @@ def test_execute_runs_only_the_planned_script_and_post_checks(tmp_path):
     assert result.ok and result.after.size == plan.new_size
     scripts = [decode_powershell(c) for c in runner.calls]
     assert scripts.count(plan.script) == 1
+    # P-3: post-check tidak mengulang Get-PartitionSupportedSize (query info bisa ±1 menit).
+    assert scripts.count(shrink.QUERY_SCRIPT) == 0 and scripts.count(shrink.AFTER_SCRIPT) == 1
     [session] = sessions(tmp_path)
     assert session.finished and session.ok and session.post_check_ok and not session.needs_attention
 

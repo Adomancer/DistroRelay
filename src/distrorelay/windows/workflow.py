@@ -279,12 +279,14 @@ class UninstallFlow:
 
         Hanya informasi. Backup Linux berisi daftar paket + dotfiles, bukan dokumen/foto/kode, dan partisi root
         sering ikut memuat /home; jadi backup ini TIDAK menggantikan pernyataan "DATA SUDAH DIBACKUP" (keputusan
-        2026-10-22, setelah review). Dihitung sekali per scan.
+        2026-10-22, setelah review). Dihitung sekali per scan, di `scan()` (thread kerja di TUI). Karena hanya
+        info, isinya dicek sebatas file ada + ukurannya cocok: arsip dotfiles bisa bergiga-giga.
         """
         if self._coverage is None:
             self._coverage = {}
             for root in self.deps.external_roots(self.report) if self.report else []:
-                for folder, manifest, problems in linux_backup.list_backups(Path(root) / "DistroRelay" / "linux-backups"):
+                backups = Path(root) / "DistroRelay" / "linux-backups"
+                for folder, manifest, problems in linux_backup.list_backups(backups, hashes=False):
                     if manifest and not problems:
                         for uuid in linux_backup.covered_uuids(manifest):
                             self._coverage.setdefault(uuid, f"{manifest.get('backup_id', folder.name)} di {root}")
@@ -334,6 +336,11 @@ class UninstallFlow:
         self.plan, self.unknown, self.preflight = None, [], None
         self.confirmed, self.backup_id, self.backup_result = set(), None, None
         self._coverage = None
+        try:
+            self.linux_backup_coverage()  # di sini, bukan saat partisi dicentang (itu di thread UI)
+        except OSError as exc:  # drive eksternal bermasalah: catatannya saja yang hilang
+            log.warning("Backup Linux di drive eksternal tidak terbaca: %s", exc)
+            self._coverage = {}
         self._changed()
         return self.report
 
@@ -370,7 +377,8 @@ class UninstallFlow:
             covered = self._covered_by(action) if action.data.get("needs_data_statement") else None
             if covered:
                 self.plan.warnings.append(
-                    f"Paket + dotfiles partisi {action.data['id']} sudah dibackup ({covered}, UUID filesystem cocok). "
+                    f"Paket + dotfiles partisi {action.data['id']} sudah dibackup ({covered}, UUID filesystem cocok; "
+                    "file backup ada dengan ukuran yang benar, hash-nya dicek saat dipakai di Linux). "
                     f"Itu bukan backup dokumen/foto/kode, jadi pernyataan {DATA_WORD} tetap diminta"
                 )
         self._changed()

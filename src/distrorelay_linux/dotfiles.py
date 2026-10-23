@@ -17,6 +17,8 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # file lebih besar dari ini (cache, image) tidak dibackup
+# Total isi arsip. Profil browser di ~/.config bisa bergiga-giga; dotfiles bukan backup data pribadi.
+MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
 
 
 @dataclass
@@ -220,6 +222,7 @@ def write_archive(
     max_file_size: int = MAX_FILE_SIZE,
     exclude: list[str] = (),
     follow_symlinks: bool = False,
+    max_total_size: int = MAX_TOTAL_SIZE,
 ) -> ArchiveReport:
     """Kemas path di home (relatif, tanpa '~/') ke tar.gz. Symlink dan file khusus tidak ikut (dicatat).
 
@@ -271,6 +274,8 @@ def write_archive(
             report.skipped.append((rel, "bukan file biasa"))
         elif info.st_size > max_file_size:
             report.skipped.append((rel, f"lebih dari {max_file_size // (1024 * 1024)} MB"))
+        elif report.total_size + info.st_size > max_total_size:
+            report.skipped.append((rel, f"arsip sudah mencapai batas {max_total_size // (1024 * 1024)} MB"))
         else:
             tar.add(str(path), arcname=rel, recursive=False)
             seen.add(rel)

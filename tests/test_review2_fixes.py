@@ -22,6 +22,7 @@ from textual.widgets import Input, OptionList
 
 from distrorelay.common import packages as packages_mod
 from distrorelay.common import profile as profile_mod
+from distrorelay.logging_setup import prune_logs
 from distrorelay.tui.app import DistroRelayApp
 from distrorelay.tui.sessions import SessionsScreen
 from distrorelay.windows import iso as iso_mod
@@ -255,3 +256,168 @@ def test_b5_tui_journal_screen_marks_a_session_resolved(tmp_path):
             assert app.screen.query_one("#attention", OptionList).option_count == 0
 
     asyncio.run(scenario())
+
+
+# --- P-1: backup Linux dibaca streaming, dan tidak di thread UI ---------------------------------
+
+
+def test_p1_latest_backup_stops_at_the_newest_valid_one(tmp_path, monkeypatch):
+    kit, older = run_backup(tmp_path)
+    newer = linux_backup.create_backup(kit, linux_runner(), FEDORA, home=tmp_path / "home", curate=lambda c: [],
+                                       now=datetime(2026, 10, 23, 9, 0, 0))
+    checked = []
+    real = linux_backup.verify
+    monkeypatch.setattr(linux_backup, "verify", lambda path, **kw: checked.append(Path(path).name) or real(path, **kw))
+    assert linux_backup.latest_backup(kit.backups_dir) == newer.path
+    assert checked == [newer.path.name]  # backup yang lebih lama tidak dibaca
+
+
+def test_p1_quick_check_sees_missing_or_resized_files_without_reading_them(tmp_path):
+    kit, result = run_backup(tmp_path)
+    archive = result.path / linux_backup.DOTFILES
+    data = archive.read_bytes()
+    archive.write_bytes(bytes([data[0] ^ 1]) + data[1:])  # isi berubah, ukuran sama
+    assert linux_backup.verify(result.path, hashes=False) == []
+    assert "hash tidak cocok" in linux_backup.verify(result.path)[0]
+    archive.write_bytes(data + b"x")
+    assert "ukurannya berubah" in linux_backup.verify(result.path, hashes=False)[0]
+
+
+def test_p1_dotfiles_archive_has_a_total_size_limit(tmp_path):
+    home = tmp_path / "home"
+    (home / "a").mkdir(parents=True)
+    (home / "a" / "1.bin").write_bytes(b"x" * 600)
+    (home / "a" / "2.bin").write_bytes(b"y" * 600)
+    report = dotfiles.write_archive(io.BytesIO(), home, ["a"], max_total_size=1000)
+    assert report.files == ["a/1.bin"]
+    assert [(rel, "batas" in why) for rel, why in report.skipped] == [("a/2.bin", True)]
+
+
+def test_p1_flow_checks_linux_backups_during_scan_not_while_selecting(tmp_path, monkeypatch):
+    flow, bcd, ext = make_flow(tmp_path)
+    calls = []
+    real = linux_backup.list_backups
+    monkeypatch.setattr(linux_backup, "list_backups", lambda path, **kw: calls.append(kw) or real(path, **kw))
+    flow.scan()
+    after_scan = len(calls)
+    assert after_scan >= 1 and all(kw == {"hashes": False} for kw in calls)
+    flow.select(["efi:fedora"])
+    flow.select(["efi:fedora", "efi:arch"])
+    assert len(calls) == after_scan
+
+
+# --- P-2: waktu baca NVRAM tercatat ---------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="read_nvram hanya untuk Windows")
+def test_p2_nvram_read_logs_how_many_variables_and_how_long(monkeypatch, caplog):
+    option = load_option("Fedora", [hd_node(1, ESP_GUID), file_node("\\EFI\\fedora\\shimx64.efi")], b"")
+    values = {"BootOrder": bytes([1, 0]), "Boot0001": option}
+    monkeypatch.setattr(nvram, "_enable_privilege", lambda name: None)
+    monkeypatch.setattr(nvram, "_get_variable", lambda name, missing_ok=False: values.get(name))
+    with caplog.at_level(logging.INFO, logger="distrorelay.windows.nvram"):
+        snapshot = nvram.read_nvram()
+    assert list(snapshot.options) == [1]
+    assert "NVRAM: 259 variabel diminta (1 Boot#### ada)" in caplog.text
+
+
+# --- P-3 ada di tests/test_shrink.py (query post-check ringan) -------------------------------------
+# --- P-4: feed ISO diambil bersamaan ---------------------------------------------------------------
+
+
+def _slow_source(name: str, barrier: threading.Barrier):
+    def latest(fetch, edition):
+        barrier.wait()  # kalau diambil berurutan, distro kedua belum mulai dan ini timeout
+        url = f"https://example.org/{name}-1.iso"
+        return Release(name, "1", "x", f"{name}-1.iso", url, DETACHED_ISO, signature_url=url + ".sig", sha256="0" * 64)
+
+    return SimpleNamespace(NAME=name.title(), latest=latest, LOCAL_PATTERN=re.compile("^$"), DEFAULT_EDITION="x")
+
+
+def test_p4_feeds_are_fetched_at_the_same_time_and_rows_keep_their_order(tmp_path):
+    barrier = threading.Barrier(2, timeout=5)
+    sources = {"zeta": _slow_source("zeta", barrier), "alfa": _slow_source("alfa", barrier)}
+    waiting = []
+    rows = catalog.check(sources, fetch=None, downloads_root=tmp_path, progress=waiting.append)
+    assert [r.distro for r in rows] == ["zeta", "alfa"]
+    assert all(r.latest is not None for r in rows), [r.error for r in rows]
+    assert len(waiting) == 1 and len(waiting[0]) == 1
+
+
+# --- P-5: ISO tidak dibaca ulang tanpa perlu ---------------------------------------------------------
+
+
+def test_p5_download_reports_sha256_including_a_resumed_part(http_server, tmp_path):
+    http_server.files["/x.iso"] = BIG
+    (tmp_path / "x.iso.part").write_bytes(BIG[:1_000_000])
+    seen = []
+    _get(http_server, tmp_path / "x.iso", on_sha256=seen.append)
+    assert seen == [hashlib.sha256(BIG).hexdigest()]
+
+
+@needs_gpgv
+def test_p5_arch_copy_reuses_the_recorded_gpgv_result_but_still_checks_sha256(tmp_path):
+    tools = make_tools(tmp_path)
+    runs = []
+    real_run = tools.run_gpgv
+    tools.run_gpgv = lambda args, cwd: runs.append(args) or real_run(args, cwd)
+    assert manager.prepare(fake_release(DETACHED_ISO), TEST_KEYS, tools).ok
+    saved = iso_mod.saved_releases("fake", tools.root)[0]
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    before = len(runs)
+    steps = manager.copy_to_drive(saved, TEST_KEYS, tools, usb)
+    assert all(s.ok for s in steps), steps
+    assert len(runs) == before  # gpgv tidak membaca seluruh ISO lagi
+    (usb / saved.release.iso_name).unlink()
+    data = bytearray(saved.iso_path.read_bytes())
+    data[10] ^= 1  # ISO berubah sesudah lolos verifikasi
+    saved.iso_path.write_bytes(bytes(data))
+    steps = manager.copy_to_drive(saved, TEST_KEYS, tools, usb)
+    assert not all(s.ok for s in steps) and not list(usb.iterdir())
+
+
+# --- P-6: journal di-cache, log lama dihapus ----------------------------------------------------------
+
+
+def test_p6_unchanged_journals_are_not_parsed_again(tmp_path, monkeypatch):
+    _cut_uninstall(tmp_path)
+    sessions(tmp_path)
+    parsed = []
+    real = journal_mod.summarize
+    monkeypatch.setattr(journal_mod, "summarize", lambda path: parsed.append(path) or real(path))
+    sessions(tmp_path)
+    assert parsed == []
+    Journal(sorted(tmp_path.glob("*.jsonl"))[0]).mark_resolved("x")
+    assert sessions(tmp_path)[0].resolved_how == "manual" and len(parsed) == 1
+
+
+def test_p6_old_daily_logs_are_pruned(tmp_path):
+    for day in ("2026-08-01", "2026-09-30", "2026-10-23"):
+        (tmp_path / f"distrorelay-{day}.log").write_text("x")
+    (tmp_path / "lain.log").write_text("x")
+    removed = prune_logs(tmp_path, date(2026, 10, 23))
+    assert [p.name for p in removed] == ["distrorelay-2026-08-01.log"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "distrorelay-2026-09-30.log", "distrorelay-2026-10-23.log", "lain.log"]
+
+
+# --- P-7: Arch sinkron sekali, lalu per paket tanpa -Syu ------------------------------------------------
+
+
+def test_p7_arch_fallback_syncs_once_then_installs_package_by_package():
+    backend = pm.backend_for("arch")
+    step = provision.Step("native", "Pasang paket", [backend.install(["git", "vlc"], False)], each=["git", "vlc"],
+                          each_command=lambda names: backend.install_one(names, False),
+                          each_prepare=backend.prepare_each(False))
+    runner = LinuxFakeRunner()
+    runner.add("sudo pacman -Syu --needed --noconfirm git vlc", 1)
+    runner.add("sudo pacman -S --needed --noconfirm vlc", 1)
+    result = provision._run_step(step, runner)
+    assert result.status == "sebagian" and result.message == "gagal: vlc"
+    assert runner.ran() == [
+        "sudo pacman -Syu --needed --noconfirm git vlc",
+        "sudo pacman -Syu --noconfirm",
+        "sudo pacman -S --needed --noconfirm git",
+        "sudo pacman -S --needed --noconfirm vlc",
+    ]

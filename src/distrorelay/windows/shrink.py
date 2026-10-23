@@ -48,6 +48,14 @@ ConvertTo-Json -Compress -InputObject @{
 }
 """
 
+# Post-check hanya butuh identitas + ukuran C:; Get-PartitionSupportedSize (bisa ±1 menit) tidak perlu diulang.
+AFTER_SCRIPT = r"""# distrorelay:shrink-after
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$p = Get-Partition -DriveLetter C
+ConvertTo-Json -Compress -InputObject @{ DiskNumber = $p.DiskNumber; Guid = [string]$p.Guid; Offset = $p.Offset; Size = $p.Size }
+"""
+
 SHRINK_TEMPLATE = r"""# distrorelay:shrink-c
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -126,6 +134,26 @@ def read_c_drive(runner: Runner) -> CDrive:
     return parse_query(result.stdout)
 
 
+@dataclass(frozen=True)
+class CPartition:
+    disk_number: int
+    guid: str
+    offset: int
+    size: int
+
+
+def read_c_partition(runner: Runner) -> CPartition:
+    """Identitas + ukuran C: saja, untuk post-check (read-only, cepat)."""
+    result = runner.run(powershell_args(AFTER_SCRIPT))
+    if not result.ok:
+        raise ShrinkError(f"Gagal membaca partisi C:: {result.output()}")
+    try:
+        data = json.loads(result.stdout)
+        return CPartition(int(data["DiskNumber"]), str(data["Guid"]), int(data["Offset"]), int(data["Size"]))
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ShrinkError(f"Info partisi C: tidak terbaca: {exc}") from exc
+
+
 @dataclass
 class ShrinkPlan:
     drive: CDrive
@@ -193,7 +221,7 @@ def plan_shrink(drive: CDrive, shrink_by: int) -> ShrinkPlan:
 class ShrinkResult:
     ok: bool
     message: str
-    after: CDrive | None = None
+    after: CPartition | None = None
     journal: Path | None = None
 
 
@@ -249,7 +277,7 @@ def _execute(plan: ShrinkPlan, inner: Runner, journal_root: Path | None) -> Shri
 
     failed = []
     try:
-        after = read_c_drive(runner)
+        after = read_c_partition(runner)
     except ShrinkError as exc:
         after = None
         failed.append(str(exc))

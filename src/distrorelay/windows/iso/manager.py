@@ -109,8 +109,11 @@ def prepare(
         if iso.is_file():  # gagal bukan karena isi ISO (mis. gpgv bermasalah): jangan unduh ulang
             return PrepareResult(release, folder, existing, notes)
         notes.append("ISO lama tidak lolos verifikasi, jadi disisihkan (.rejected) dan diunduh ulang.")
-    tools.download(release.iso_url, iso, expected_size=release.size, progress=progress, should_stop=should_stop)
-    result = verify_release(release, folder, keys, gpgv=tools.gpgv, run=tools.run_gpgv, progress=hash_progress)
+    downloaded: list[str] = []  # SHA256 yang dihitung sambil mengunduh (ISO tidak dibaca ulang hanya untuk di-hash)
+    tools.download(release.iso_url, iso, expected_size=release.size, progress=progress, should_stop=should_stop,
+                   on_sha256=downloaded.append)
+    result = verify_release(release, folder, keys, gpgv=tools.gpgv, run=tools.run_gpgv, progress=hash_progress,
+                            known_sha256=downloaded[-1] if downloaded else None)
     _record(release, folder, result)
     if not result.ok and not iso.is_file():
         notes.append(f"ISO yang gagal verifikasi disimpan sebagai {release.iso_name}{REJECTED_SUFFIX}; jangan dipakai.")
@@ -143,6 +146,14 @@ def copy_to_drive(
     iso = saved.iso_path
     if not iso.is_file():
         return [Step("ISO", False, f"{iso} belum terunduh")]
+    recorded = _verified_iso_sha256(saved)
+    if release.scheme == DETACHED_ISO and recorded:
+        # Arch menandatangani ISO-nya langsung: gpgv ulang = membaca seluruh ISO lagi. ISO ini sudah lolos gpgv dengan
+        # SHA256 yang tercatat; SHA256 saat menyalin harus sama persis, jadi isi yang berubah tetap tertolak.
+        when = (saved.verified or {}).get("verified_at", "sebelumnya")
+        steps = [Step("Tanda tangan GPG", True, f"{iso.name}: lolos gpgv {when}; isinya dicocokkan lewat SHA256 saat disalin")]
+        return steps + copy_verified(iso, Path(target), recorded, filesystem=filesystem, progress=progress,
+                                     hash_progress=hash_progress, disk_usage=disk_usage)
     signed = signed_sha256(release, saved.folder, keys, gpgv=tools.gpgv, run=tools.run_gpgv)
     steps = list(signed.steps)
     if not signed.ok or not signed.sha256:
@@ -151,6 +162,19 @@ def copy_to_drive(
         return steps
     return steps + copy_verified(iso, Path(target), signed.sha256, filesystem=filesystem, progress=progress,
                                  hash_progress=hash_progress, disk_usage=disk_usage)
+
+
+def _verified_iso_sha256(saved: SavedRelease) -> str | None:
+    """SHA256 dari verified.json kalau catatannya untuk ISO ini, cocok dengan nilai rilisnya, dan ukurannya sama."""
+    verified = saved.verified or {}
+    digest = str(verified.get("sha256") or "").lower()
+    try:
+        size = saved.iso_path.stat().st_size
+    except OSError:
+        return None
+    same = (verified.get("iso_name") == saved.release.iso_name and verified.get("size") == size
+            and digest and digest == (saved.release.sha256 or "").lower())
+    return digest if same else None
 
 
 def copy_verified(

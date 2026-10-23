@@ -33,6 +33,7 @@ class Step:
     after: tuple[str, ...] = ()  # langkah yang harus berhasil dulu
     each: list[str] = field(default_factory=list)  # paket untuk dicoba satu per satu kalau perintah gagal
     each_command: Callable[[list[str]], Command] | None = None
+    each_prepare: list[Command] = field(default_factory=list)  # sekali, sebelum dicoba satu per satu
     approval: str | None = None  # pertanyaan tambahan sebelum langkah ini (mis. membangun paket dari AUR)
 
 
@@ -119,7 +120,8 @@ def build_plan(
                 f"Pasang {len(native)} paket lewat {backend.name}",
                 backend.refresh(is_root) + [backend.install(native, is_root)],
                 each=native,
-                each_command=lambda packages: backend.install(packages, is_root),
+                each_command=lambda packages: backend.install_one(packages, is_root),
+                each_prepare=backend.prepare_each(is_root),
             )
         )
 
@@ -282,6 +284,11 @@ def _run_step(step: Step, runner) -> StepResult:
             continue
         if not step.each or step.each_command is None:
             return StepResult(step.key, step.title, "gagal", f"`{cmd.display()}` keluar dengan kode {result.returncode}")
+        for prepare in step.each_prepare:
+            prepared = runner.run(prepare, capture=False)
+            if not prepared.ok:
+                return StepResult(step.key, step.title, "gagal",
+                                  f"`{prepare.display()}` keluar dengan kode {prepared.returncode}")
         failed = [name for name in step.each if not runner.run(step.each_command([name]), capture=False).ok]
         if len(failed) == len(step.each):
             return StepResult(step.key, step.title, "gagal", f"semua gagal: {', '.join(failed)}")

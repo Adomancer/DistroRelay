@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -184,11 +184,24 @@ def _succeeded(session: SessionSummary) -> bool:
     return session.finished and bool(session.ok) and bool(session.post_check_ok)
 
 
+# path -> ((mtime, ukuran), ringkasan): file journal hanya bertambah, jadi yang tidak berubah tidak di-parse ulang.
+_SUMMARIES: dict[Path, tuple[tuple[int, int], SessionSummary]] = {}
+
+
+def _cached_summary(path: Path) -> SessionSummary:
+    info = path.stat()
+    key = (info.st_mtime_ns, info.st_size)
+    cached = _SUMMARIES.get(path)
+    if cached is None or cached[0] != key:
+        cached = _SUMMARIES[path] = (key, summarize(path))
+    return replace(cached[1])  # salinan: sessions() mengisi resolved_by per pemanggilan
+
+
 def sessions(directory: Path | None = None) -> list[SessionSummary]:
     directory = directory or journal_dir()
     if not directory.exists():
         return []
-    found = [summarize(p) for p in sorted(directory.glob("*.jsonl"))]  # nama sesi = waktu mulai
+    found = [_cached_summary(p) for p in sorted(directory.glob("*.jsonl"))]  # nama sesi = waktu mulai
     for n, session in enumerate(found):
         session.resolved_by = session.resolved_how = None
         if not session.left_partial_state:

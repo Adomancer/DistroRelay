@@ -296,9 +296,11 @@ class FakeDownload:
         self.content = content
         self.calls = []
 
-    def __call__(self, url, dest, *, expected_size=None, progress=None, should_stop=None):
+    def __call__(self, url, dest, *, expected_size=None, progress=None, should_stop=None, on_sha256=None):
         self.calls.append(url)
         Path(dest).write_bytes(self.content)
+        if on_sha256 is not None:
+            on_sha256(hashlib.sha256(self.content).hexdigest())
         return Path(dest)
 
 

@@ -6,13 +6,18 @@ perubahan entri boot di DistroRelay selalu lewat bcdedit.
 
 from __future__ import annotations
 
+import logging
 import re
 import struct
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 
+log = logging.getLogger(__name__)
+
 EFI_GLOBAL_VARIABLE = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
+_BOOT_VARIABLE = re.compile(r"Boot[0-9A-Fa-f]{4}")
 LOAD_OPTION_ACTIVE = 0x00000001
 LOAD_OPTION_HIDDEN = 0x00000008
 
@@ -338,6 +343,7 @@ def read_nvram(scan_range: int = 0x100) -> NvramSnapshot:
     """Baca BootOrder, BootCurrent, BootNext, dan semua Boot#### (yang ada di BootOrder + 0000..00FF)."""
     if sys.platform != "win32":
         raise NvramError("Pembacaan NVRAM hanya didukung di Windows")
+    started = time.perf_counter()
     _enable_privilege("SeSystemEnvironmentPrivilege")
     raw: dict[str, str] = {}
     order = _get_variable("BootOrder", missing_ok=True) or b""
@@ -347,9 +353,14 @@ def read_nvram(scan_range: int = 0x100) -> NvramSnapshot:
         if value is not None:
             raw[name] = value.hex()
     boot_order = list(struct.unpack(f"<{len(order) // 2}H", order[: len(order) // 2 * 2]))
-    for number in sorted(set(boot_order) | set(range(scan_range))):
+    numbers = sorted(set(boot_order) | set(range(scan_range)))
+    for number in numbers:
         name = f"Boot{number:04X}"
         value = _get_variable(name, missing_ok=True)
         if value is not None:
             raw[name] = value.hex()
+    # Review 2026-10-23 (P-2): ukur dulu sebelum memutuskan enumerasi nama variabel.
+    found = sum(1 for name in raw if _BOOT_VARIABLE.fullmatch(name))
+    log.info("NVRAM: %d variabel diminta (%d Boot#### ada) dalam %.3f detik",
+             len(numbers) + 3, found, time.perf_counter() - started)
     return snapshot_from_raw(raw)
