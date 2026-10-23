@@ -16,7 +16,7 @@ from typing import Callable
 
 from ..format import human_size
 from .disks import DiskInventory, Partition
-from .runner import Runner, powershell_args
+from .runner import Runner, powershell_args, ps_string
 from .scanner import ScanReport
 from .signature import Signature, check_signature
 
@@ -33,14 +33,14 @@ M2A_CMDLETS = frozenset({"mount-diskimage", "dismount-diskimage"})
 ISO_MOUNT_SCRIPT = r"""# distrorelay:iso-mount
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$image = Mount-DiskImage -ImagePath '__PATH__' -Access ReadOnly -StorageType ISO -PassThru
+$image = Mount-DiskImage -ImagePath __PATH__ -Access ReadOnly -StorageType ISO -PassThru
 $letter = ($image | Get-Volume).DriveLetter
 ConvertTo-Json -InputObject ([string]$letter) -Compress
 """
 
 ISO_DISMOUNT_SCRIPT = r"""# distrorelay:iso-dismount
 $ErrorActionPreference = 'Stop'
-$null = Dismount-DiskImage -ImagePath '__PATH__'
+$null = Dismount-DiskImage -ImagePath __PATH__
 """
 
 _INSTALLER_FILES = ("sources\\install.wim", "sources\\install.esd", "sources\\install.swm")
@@ -102,7 +102,7 @@ class PreflightResult:
 
 
 def _script(template: str, path: Path | str) -> str:
-    return template.replace("__PATH__", str(path).replace("'", "''"))
+    return template.replace("__PATH__", ps_string(str(path)))
 
 
 def _root(letter: str) -> Path:

@@ -235,7 +235,7 @@ def test_second_partition_on_the_windows_ssd_is_never_a_backup_target():
 
 
 def test_cli_uninstall_runs_on_the_flow(tmp_path, monkeypatch):
-    from distrorelay.__main__ import _run_uninstall_command
+    from distrorelay.cli.uninstall import cmd_uninstall
     from distrorelay.windows.backup import backup_runner, create_backup
 
     flow, bcd, ext = make_flow(tmp_path)
@@ -247,12 +247,12 @@ def test_cli_uninstall_runs_on_the_flow(tmp_path, monkeypatch):
     answers = iter(["vm", "ya", "HAPUS"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     args = argparse.Namespace(backup=backup.backup_id, select=SELECT)
-    assert _run_uninstall_command(args, flow=flow) == 0
+    assert cmd_uninstall(args, flow=flow) == 0
     assert FEDORA not in bcd.entries and ARCH not in bcd.entries
 
 
 def test_cli_refuses_lowercase_confirmation(tmp_path, monkeypatch):
-    from distrorelay.__main__ import _run_uninstall_command
+    from distrorelay.cli.uninstall import cmd_uninstall
     from distrorelay.windows.backup import backup_runner, create_backup
 
     flow, bcd, ext = make_flow(tmp_path)
@@ -263,7 +263,7 @@ def test_cli_refuses_lowercase_confirmation(tmp_path, monkeypatch):
     )
     answers = iter(["vm", "ya", "hapus"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    assert _run_uninstall_command(argparse.Namespace(backup=backup.backup_id, select=SELECT), flow=flow) == 1
+    assert cmd_uninstall(argparse.Namespace(backup=backup.backup_id, select=SELECT), flow=flow) == 1
     assert FEDORA in bcd.entries
 
 

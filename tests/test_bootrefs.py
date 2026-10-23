@@ -149,9 +149,14 @@ def test_entry_pointing_to_deleted_partition(tmp_path):
     raw["Boot0001"] = load_option(
         "Fedora", [hd_node(7, "12345678-1234-4234-8234-123456789abc"), file_node("\\EFI\\fedora\\shimx64.efi")]
     ).hex()
-    fedora = by_key(run(tmp_path, laptop_esp_files(), nvram=raw), "efi:fedora")
-    entry = next(c for c in fedora.components if c.kind == "boot-entry")
+    analysis = run(tmp_path, laptop_esp_files(), nvram=raw)
+    # Entri menunjuk partisi lain (bukan ESP ini): tidak digabung dengan folder EFI\fedora di ESP ini.
+    elsewhere = next(i for i in analysis.installations if i.key.startswith("efi:fedora@"))
+    entry = next(c for c in elsewhere.components if c.kind == "boot-entry")
     assert any("tidak ada di disk mana pun" in e for e in entry.evidence)
+    assert elsewhere.verdict == VERDICT_UNSURE
+    assert any("disk eksternal/USB yang sedang dicabut" in r for r in elsewhere.reasons)
+    assert "nv:0001" not in {c.ref for c in by_key(analysis, "efi:fedora").components}
 
 
 def test_systemd_boot_arch_is_grouped_with_kernel_files(tmp_path):

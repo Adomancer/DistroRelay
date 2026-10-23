@@ -134,7 +134,7 @@ def test_release_rejects_unsafe_names_and_plain_http():
 
 
 def test_parser_choices_match_sources():
-    from distrorelay.__main__ import ISO_DISTROS
+    from distrorelay.cli.parser import ISO_DISTROS
 
     assert set(ISO_DISTROS) == set(sources.SOURCES)
 
@@ -296,9 +296,11 @@ class FakeDownload:
         self.content = content
         self.calls = []
 
-    def __call__(self, url, dest, *, expected_size=None, progress=None, should_stop=None):
+    def __call__(self, url, dest, *, expected_size=None, progress=None, should_stop=None, on_sha256=None):
         self.calls.append(url)
         Path(dest).write_bytes(self.content)
+        if on_sha256 is not None:
+            on_sha256(hashlib.sha256(self.content).hexdigest())
         return Path(dest)
 
 
@@ -364,9 +366,16 @@ def test_text_outside_the_clearsigned_block_is_ignored(tmp_path):
 
 @needs_gpgv
 def test_arch_iso_signed_by_attacker_is_rejected(tmp_path):
+    """Ditandatangani kunci yang tidak di-pin: ditolak dan tidak bisa disalin. ISO-nya tidak disisihkan (bukan BADSIG),
+    karena unduh ulang tidak menolong kalau masalahnya kunci; yang menentukan tetap verified.json + cek saat salin."""
     tools = make_tools(tmp_path, {BASE + "fake-1.0-x86_64.iso.sig": fixture("fake-1.0-x86_64.iso.evil.sig")})
     result = manager.prepare(fake_release(DETACHED_ISO), TEST_KEYS, tools)
-    assert not result.ok and (result.folder / "fake-1.0-x86_64.iso.rejected").exists()
+    assert not result.ok and "tidak di-pin" in result.verification.steps[0].message
+    assert not (result.folder / iso_mod.VERIFIED_FILE).exists()
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    saved = iso_mod.saved_releases("fake", tools.root)[0]
+    assert not manager.copy_to_drive(saved, TEST_KEYS, tools, usb)[0].ok and not list(usb.iterdir())
 
 
 @needs_gpgv
@@ -594,38 +603,38 @@ def iso_args(command, distro=None, **extra):
 
 
 def test_cli_check_without_ventoy(tmp_path, capsys):
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     tools = manager.Tools(gpgv="", fetch=fake_fetch(FEEDS), root=tmp_path)
-    code = _run_iso_command(iso_args("check"), tools=tools, volumes=lambda: [])
+    code = cmd_iso(iso_args("check"), tools=tools, volumes=lambda: [])
     out = capsys.readouterr().out
     assert code == 0 and "44 (Workstation" in out and "tidak terdeteksi" in out
 
 
 def test_cli_download_needs_gpgv(tmp_path, capsys):
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     tools = manager.Tools(gpgv="", fetch=fake_fetch(FEEDS), root=tmp_path)
-    assert _run_iso_command(iso_args("download", "mint"), tools=tools) == 1
+    assert cmd_iso(iso_args("download", "mint"), tools=tools) == 1
     assert "winget install GnuPG.GnuPG" in capsys.readouterr().out
 
 
 @needs_gpgv
 def test_cli_download_real_mint_signature_but_wrong_iso_is_rejected(tmp_path, capsys):
     """Tanda tangan sha256sum.txt Mint asli lolos dengan kunci bawaan, tapi ISO palsu ditolak SHA256-nya."""
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     files = {**FEEDS, mint.BASE + "22.3/sha256sum.txt.gpg": fixture("sha256sum.txt.gpg")}
     tools = manager.Tools(gpgv=GPGV, fetch=fake_fetch(files), download=FakeDownload(b"bukan ISO asli"), root=tmp_path)
-    code = _run_iso_command(iso_args("download", "mint"), tools=tools)
+    code = cmd_iso(iso_args("download", "mint"), tools=tools)
     out = capsys.readouterr().out
     assert code == 1 and "Linux Mint ISO Signing Key" in out and "TIDAK lolos" in out
     assert (tmp_path / "mint" / "22.3-cinnamon" / "linuxmint-22.3-cinnamon-64bit.iso.rejected").exists()
 
 
 def test_cli_copy_without_download(tmp_path, capsys):
-    from distrorelay.__main__ import _run_iso_command
+    from distrorelay.cli.iso import cmd_iso
 
     tools = manager.Tools(gpgv="gpgv", fetch=fake_fetch(FEEDS), root=tmp_path)
-    assert _run_iso_command(iso_args("copy", "fedora"), tools=tools, volumes=lambda: []) == 1
+    assert cmd_iso(iso_args("copy", "fedora"), tools=tools, volumes=lambda: []) == 1
     assert "Belum ada unduhan" in capsys.readouterr().out

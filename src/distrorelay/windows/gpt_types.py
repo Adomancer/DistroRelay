@@ -6,6 +6,7 @@ dan hanya tipe ini yang bisa dibuat ulang lewat Pulihkan. Kategori di `PROTECTED
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 LINUX = "linux"
@@ -53,6 +54,16 @@ _TABLE = (
 TYPES = {t.guid: t for t in _TABLE}
 
 PROTECTED_CATEGORIES = frozenset({"esp", "msr", "basic", "recovery", "windows-other"})
+
+
+GUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+BRACED_GUID = re.compile(r"\{" + GUID_PATTERN + r"\}")  # bentuk di bcdedit / PowerShell: {xxxxxxxx-...}
+
+
+def braced_guid(value) -> str | None:
+    """'{ABC...}' atau 'abc...' -> '{abc...}' (huruf kecil); None kalau bukan GUID. Untuk ditempel ke script."""
+    text = str(value or "").strip().strip("{}").lower()
+    return "{" + text + "}" if re.fullmatch(GUID_PATTERN, text) else None
 
 
 def normalize_guid(value: str | None) -> str | None:

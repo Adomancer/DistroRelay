@@ -9,7 +9,7 @@ from distrorelay.windows.bootrefs import VERDICT_LEFTOVER, VERDICT_NOT_TARGET, a
 from distrorelay.windows.disks import MIB
 from distrorelay.windows.fsprobe import FsInfo, probe_bytes
 from distrorelay.windows.runner import CommandResult
-from helpers import BOOTMGFW, fake_esp, laptop_inventory
+from helpers import BOOTMGFW, fake_esp, gpt_slots_like_windows, laptop_inventory
 from test_laptop_real import by_key, real_entries
 
 _spec = importlib.util.spec_from_file_location("fake_leftovers", Path(__file__).parent / "vm" / "fake_leftovers.py")
@@ -29,7 +29,8 @@ def analyze_vm(tmp_path, inventory):
         fsinfo["disk0-p5"] = probe_bytes(fl.ext4_head())
     esp = fake_esp(tmp_path, inventory, vm_esp_files())
     entries, notes = real_entries()
-    return analyze(inventory, fsinfo, True, entries, esp, collect_esp_refs(tmp_path, esp), notes)
+    return analyze(inventory, fsinfo, True, entries, esp, collect_esp_refs(tmp_path, esp), notes,
+                   gpt_slots=gpt_slots_like_windows(inventory))
 
 
 def without_p5():
@@ -53,11 +54,11 @@ def test_fake_leftovers_match_real_laptop_verdicts(tmp_path):
 
     arch = by_key(analysis, "efi:arch")
     assert arch.verdict == VERDICT_LEFTOVER
-    assert any("partisi nomor 4" in r and "bukan partisi Linux" in r for r in arch.reasons)
+    assert any("slot GPT 4" in r and "bukan partisi Linux" in r for r in arch.reasons)
 
     orphan = by_key(analysis, "grubdir:grub")
     assert orphan.verdict == VERDICT_LEFTOVER
-    assert any(fl.ARCH_ROOT_UUID in r and "sudah tidak ada" in r for r in orphan.reasons)
+    assert any(fl.ARCH_ROOT_UUID in r and "tidak ada di disk yang terpasang" in r for r in orphan.reasons)
 
     assert by_key(analysis, "other-esp").verdict == VERDICT_NOT_TARGET
     assert [c.ref for c in by_key(analysis, "unattached").components] == ["mach_kernel", "System"]
@@ -67,7 +68,7 @@ def test_without_boot_partition_fedora_is_still_leftover(tmp_path):
     analysis = analyze_vm(tmp_path, without_p5())
     fedora = by_key(analysis, "efi:fedora")
     assert fedora.verdict == VERDICT_LEFTOVER
-    assert any(fl.BOOT_UUID in r and "sudah tidak ada" in r for r in fedora.reasons)
+    assert any(fl.BOOT_UUID in r and "tidak ada di disk yang terpasang" in r for r in fedora.reasons)
 
 
 def test_boot_partition_slot_is_aligned_and_after_existing_partitions():

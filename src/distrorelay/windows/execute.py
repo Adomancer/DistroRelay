@@ -19,27 +19,29 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import stat
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from ..format import human_size
 from . import flush
-from .backup import sha256_file, verify_backup_dir
+from .backup import creation_checks, sha256_file, valid_backup_id, verify_backup_dir
 from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware, merge_entries
 from .disks import DiskInventory, parse_inventory
-from .esp import norm_path
+from .esp import contained_path, norm_path
 from .journal import Journal
 from .nvram import NvramSnapshot
-from .preflight import FAIL, PreflightResult
-from .runner import AllowListRunner, Runner, powershell_args
+from .preflight import FAIL, PreflightResult, system_disks
+from .gpt_types import braced_guid
+from .runner import AllowListRunner, Runner, powershell_args, program_name
 from .scanner import ScanReport
 from .signature import Signature, check_signature
 from .stopping import StopSignal
-from .uninstall_plan import PlannedAction, UninstallPlan, partition_refusal
+from .uncached import sha256_uncached
+from .uninstall_plan import VENDOR_DIRS, PlannedAction, UninstallPlan, partition_refusal
 
 log = logging.getLogger(__name__)
 
@@ -77,19 +79,16 @@ $ErrorActionPreference = 'Stop'
 $null = Suspend-BitLocker -MountPoint 'C:' -RebootCount 1
 """
 
-_GUID_TEXT = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
-
 class ExecutionError(RuntimeError):
     pass
 
 
 def _guid(value) -> str:
     """GUID dari data rencana, divalidasi sebelum ditempel ke script PowerShell."""
-    text = str(value or "").strip("{}").lower()
-    if not _GUID_TEXT.match(text):
+    guid = braced_guid(value)
+    if guid is None:
         raise ExecutionError(f"GUID tidak valid di rencana: {value!r}")
-    return "{" + text + "}"
+    return guid
 
 
 def partition_delete_script(data: dict) -> str:
@@ -142,10 +141,6 @@ class SimulatedCrash(RuntimeError):
     """Crash buatan untuk test VM: langkah sudah dijalankan tapi belum dicatat selesai di journal."""
 
 
-def _exe(args: Sequence[str]) -> str:
-    return Path(args[0]).stem.lower() if args else ""
-
-
 def execution_runner(inner: Runner, plan: UninstallPlan) -> AllowListRunner:
     """Runner tahap eksekusi: read-only + perintah pengubah yang persis ada di rencana."""
     allowed_ids = {
@@ -153,10 +148,11 @@ def execution_runner(inner: Runner, plan: UninstallPlan) -> AllowListRunner:
     } - WELL_KNOWN_IDS
 
     def set_windows_first(args: Sequence[str]) -> bool:
-        return _exe(args) == "bcdedit" and [a.lower() for a in args[1:]] == SET_WINDOWS_FIRST[1:]
+        return program_name(args) == "bcdedit" and [a.lower() for a in args[1:]] == SET_WINDOWS_FIRST[1:]
 
     def delete_planned_entry(args: Sequence[str]) -> bool:
-        return _exe(args) == "bcdedit" and len(args) == 3 and args[1].lower() == "/delete" and args[2].lower() in allowed_ids
+        return (program_name(args) == "bcdedit" and len(args) == 3 and args[1].lower() == "/delete"
+                and args[2].lower() in allowed_ids)
 
     return AllowListRunner(
         inner,
@@ -172,13 +168,14 @@ def safe_esp_path(root: Path, rel: str, *, fallback_target: bool = False) -> Pat
     low = norm.lower()
     if not norm or low in ("efi", "efi\\boot", "efi\\microsoft") or low.startswith("efi\\microsoft\\"):
         raise ExecutionError(f"{rel}: dilindungi, tidak boleh diubah")
+    if any(low == d or low.startswith(d + "\\") for d in VENDOR_DIRS):
+        raise ExecutionError(f"{rel}: folder alat pabrikan, dilindungi")
     if low.startswith("efi\\boot\\") and not (fallback_target and low == FALLBACK.lower()):
         raise ExecutionError(f"{rel}: file fallback firmware hanya boleh diganti lewat langkah pengembalian fallback")
-    base = root.resolve()
-    target = (base / Path(*norm.split("\\"))).resolve()
-    if target == base or base not in target.parents:
-        raise ExecutionError(f"{rel}: berada di luar ESP")
-    return target
+    try:
+        return contained_path(root, norm)
+    except ValueError as exc:
+        raise ExecutionError(f"{rel}: berada di luar ESP") from exc
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -547,7 +544,7 @@ def _execute_steps(
                 if done else f"{stop.reason} sebelum langkah pertama; tidak ada yang diubah"
             )
             result.stopped_by_user = True
-            journal.finish(False, result.stopped)
+            journal.finish(False, result.stopped, changed=False if not done else None)
             return result
         say(f"[{number}/{len(actions)}] {action.title}…")
         handler = _HANDLERS.get(action.kind)
@@ -561,6 +558,9 @@ def _execute_steps(
             except Exception as exc:  # gagal = berhenti, apa pun penyebabnya
                 log.exception("Langkah %s (%s) gagal", number, action.kind)
                 text = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ExecutionError) else str(exc)
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    text = (f"perintah tidak selesai dalam {exc.timeout:.0f} detik; STATUS TIDAK DIKETAHUI (mungkin "
+                            "sudah jalan sebagian). Scan ulang dan periksa sebelum melanjutkan")
                 journal.record(number, action.kind, action.ref, "failed", text)
                 result.steps.append(StepResult(number, action.kind, action.title, False, text))
                 result.stopped = f"Berhenti di langkah {number} ({action.title}): {text}"
@@ -579,6 +579,43 @@ def _execute_steps(
 
 
 # --- Gerbang sebelum eksekusi -----------------------------------------------
+
+
+def relevant_disks(inventory: DiskInventory, plan: UninstallPlan) -> set[str] | None:
+    """GUID disk yang layoutnya harus tetap sama: disk Windows/ESP + disk yang partisinya diubah rencana.
+
+    Flashdisk/HDD lain boleh dicolok atau dicabut (dan nomor disk boleh bergeser) tanpa membatalkan backup.
+    None = salah satunya tanpa GUID (mis. disk MBR), jadi pemanggil membandingkan semua disk.
+    """
+    numbers = system_disks(inventory)
+    for action in plan.actions:
+        if action.kind in ("delete-partition", "extend-c"):
+            part = inventory.by_guid(action.data.get("guid"))
+            if part is not None:
+                numbers.add(part.disk_number)
+    disks = [d for d in inventory.disks if d.number in numbers]
+    if not disks or any(not d.guid for d in disks):
+        return None
+    return {d.guid for d in disks}
+
+
+def _layout_changes(
+    plan: UninstallPlan, inventory: DiskInventory | None, backed: DiskInventory | None, manifest: dict
+) -> str | None:
+    """None = layout disk yang relevan sama dengan saat backup; selain itu disk mana yang berbeda."""
+    if inventory is None or backed is None:
+        return "daftar disk tidak terbaca"
+    relevant = relevant_disks(inventory, plan)
+    if relevant is None:
+        return None if manifest.get("layout_fingerprint") == inventory.fingerprint() else "semua disk dibandingkan"
+    before, now = backed.layout_of(relevant), inventory.layout_of(relevant)
+    if before == now:
+        return None
+    names = []
+    for guid in sorted({item[0] for item in before ^ now}):
+        disk = next((d for d in [*inventory.disks, *backed.disks] if d.guid == guid), None)
+        names.append(f"{disk.model or 'disk'} {{{guid}}}" if disk else f"{{{guid}}}")
+    return ", ".join(names)
 
 
 @dataclass
@@ -620,6 +657,9 @@ def check_gate(
         if check.key not in confirmed:
             problems.append(f"Belum dikonfirmasi: {check.title}")
 
+    if not valid_backup_id(backup_id):
+        problems.append(f"ID backup '{backup_id}' tidak valid: pakai ID seperti 20261021-193000, bukan path folder")
+        return gate
     local = Path(local_root) / backup_id
     gate.local_dir = local
     if not (local / "manifest.json").exists():
@@ -627,25 +667,45 @@ def check_gate(
         return gate
     failed = [v for v in verify_backup_dir(local) if not v.ok]
     if failed:
+        # Isi folder tidak bisa dipercaya (manifest rusak, file hilang/berubah): cek lain di bawah tidak berarti.
         problems.append(f"Backup lokal tidak lolos verifikasi: {failed[0].name}: {failed[0].message}")
+        return gate
     manifest = json.loads((local / "manifest.json").read_text(encoding="utf-8"))
     gate.manifest = manifest
+    # Sebagian cek saat backup dibuat tidak bisa diulang dari isi folder (BCD store terbaca, entri firmware terbaca
+    # ulang, file ESP yang dikunci), jadi hasilnya wajib hijau.
+    created = creation_checks(local)
+    if created is None:
+        problems.append("Hasil verifikasi saat backup dibuat (verification.json) tidak ada atau rusak; buat backup baru")
+    else:
+        bad = [v for v in created if not v.ok]
+        if bad:
+            problems.append(f"Backup ini gagal verifikasi saat dibuat ({bad[0].name}: {bad[0].message}); buat backup baru")
 
     if not manifest.get("usb_copy"):
         problems.append("Backup ini dibuat dengan --local-only. Eksekusi butuh backup yang punya salinan di drive eksternal")
     else:
         candidates = [Path(root) / "DistroRelay" / "backups" / backup_id for root in external_roots]
+        candidates = [c for c in candidates if c.resolve() != local.resolve()]
         external = next((c for c in candidates if (c / "manifest.json").exists()), None)
         if external is None:
             problems.append("Salinan backup di drive eksternal tidak ditemukan; colok drive tempat backup ini disalin")
         else:
             gate.external_dir = external
-            failed = [v for v in verify_backup_dir(external) if not v.ok]
+            # Dibaca langsung dari perangkat (bukan cache), dan harus salinan dari backup yang sama persis.
+            failed = [v for v in verify_backup_dir(external, sha256_uncached) if not v.ok]
             if failed:
                 problems.append(f"Salinan eksternal tidak lolos verifikasi: {failed[0].name}: {failed[0].message}")
+            elif sha256_file(external / "manifest.json") != sha256_file(local / "manifest.json"):
+                problems.append("Salinan eksternal bukan salinan backup lokal ini (manifest berbeda)")
 
-    if report.inventory is None or manifest.get("layout_fingerprint") != report.inventory.fingerprint():
-        problems.append("Layout disk berubah sejak backup dibuat; buat backup baru")
+    try:
+        backed_layout = parse_inventory((local / "partitions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RuntimeError):
+        backed_layout = None
+    changed_disks = _layout_changes(plan, report.inventory, backed_layout, manifest)
+    if changed_disks:
+        problems.append(f"Layout disk berubah sejak backup dibuat ({changed_disks}); buat backup baru")
     if report.esp is None:
         problems.append("ESP tidak terbaca")
     else:
@@ -666,10 +726,6 @@ def check_gate(
     # pernyataan backup data untuk partisi berisi data diminta saat konfirmasi akhir).
     partition_actions = [a for a in plan.actions if a.kind == "delete-partition"]
     if partition_actions:
-        try:
-            backed_layout = parse_inventory((local / "partitions.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError, RuntimeError):
-            backed_layout = None
         for action in partition_actions:
             data = action.data
             backed = backed_layout.by_guid(data.get("guid")) if backed_layout else None

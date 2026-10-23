@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +30,16 @@ from distrorelay_linux import backup as linux_backup
 
 from ..format import human_size
 from . import disks, flush, gpt_types
-from .backup import BackupResult, Verification, backup_runner, backups_root, create_backup, verify_backup_dir
+from .backup import (
+    BackupResult,
+    Verification,
+    backup_runner,
+    backups_root,
+    create_backup,
+    creation_checks,
+    valid_backup_id,
+    verify_backup_dir,
+)
 from .bootrefs import Component, Installation
 from .esp import norm_path
 from .execute import DEV_FLAG_ENV, FAIL_AFTER_ENV, ExecutionResult, GateResult, check_gate, execute_plan, execution_runner
@@ -53,9 +64,12 @@ from .scanner import ScanReport
 from .stopping import StopSignal
 from .uninstall_plan import SELECTABLE_KINDS, UninstallPlan, build_plan, expand_selection
 
+log = logging.getLogger(__name__)
+
 CONTINUE_WORD = "LANJUT"
 DELETE_WORD = "HAPUS"
 RESTORE_WORD = "PULIHKAN"
+RESOLVE_WORD = "TUNTAS"
 # Partisi yang mungkin berisi data pribadi (root, home, data, tidak dikenal): backup Linux DistroRelay baru ada di M5,
 # jadi syaratnya pernyataan yang diketik (plan: aturan backup bertingkat).
 DATA_WORD = "DATA SUDAH DIBACKUP"
@@ -82,8 +96,27 @@ def typed(value: str | None, word: str) -> bool:
     return (value or "").rstrip() == word
 
 
+def mark_session_resolved(directory: Path, name: str, word: str, note: str) -> str | None:
+    """Tandai sesi yang butuh perhatian (terputus/gagal) sebagai sudah ditangani, kalau TUNTAS diketik persis.
+
+    Untuk sesi yang kondisinya sudah dicek sendiri tanpa ada sesi sejenis yang sukses sesudahnya (mis. uninstall
+    dibatalkan lewat cara lain). Hasilnya masalah, atau None kalau berhasil.
+    """
+    session = next((s for s in incomplete_sessions(directory) if s.path.stem == name), None)
+    if session is None:
+        return f"Sesi {name} tidak ada, atau tidak sedang butuh perhatian"
+    if not typed(word, RESOLVE_WORD):
+        return f"Ketik {RESOLVE_WORD} persis (huruf besar). Tidak ada yang diubah"
+    Journal(session.path).mark_resolved(note)
+    return None
+
+
 class FlowError(RuntimeError):
-    """Langkah dipanggil di luar urutan, atau tiket tidak berlaku."""
+    """Langkah dipanggil di luar urutan, atau tiket tidak berlaku. Tidak ada yang diubah."""
+
+
+class EspMountError(FlowError):
+    """ESP gagal di-mount tepat sebelum eksekusi; tidak ada langkah yang jalan."""
 
 
 def _default_external_roots(report: ScanReport) -> list[Path]:
@@ -160,21 +193,34 @@ class BackupInfo:
     backup_id: str
     created_at: str
     usb_copy: bool  # False = dibuat dengan --local-only, tidak memenuhi syarat eksekusi
+    verified: bool | None = None  # hasil verifikasi saat dibuat (verification.json); None = tidak tercatat
+
+    @property
+    def usable(self) -> bool:
+        """Bisa dipakai untuk uninstall: punya salinan eksternal dan lolos verifikasi saat dibuat."""
+        return self.usb_copy and self.verified is True
 
     def describe(self) -> str:
         where = "lokal + drive eksternal" if self.usb_copy else "lokal saja (--local-only)"
-        return f"{self.backup_id}  ({where})"
+        status = {True: "", False: "  [GAGAL verifikasi saat dibuat]", None: "  [verifikasi tidak tercatat]"}[self.verified]
+        return f"{self.backup_id}  ({where}){status}"
 
 
 def list_backups(root: Path) -> list[BackupInfo]:
-    """Backup lokal yang punya manifest, terbaru dulu. Isinya belum diverifikasi."""
+    """Backup lokal yang punya manifest, terbaru dulu. Isinya belum diverifikasi ulang (itu tugas gerbang)."""
     found = []
     for path in Path(root).glob("*"):
+        if not valid_backup_id(path.name):  # mis. .20261023-101500.tmp = backup yang sedang/gagal dibuat
+            continue
         try:
             manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        found.append(BackupInfo(path.name, str(manifest.get("created_at") or ""), bool(manifest.get("usb_copy"))))
+        if not isinstance(manifest, dict):
+            continue
+        checks = creation_checks(path)
+        found.append(BackupInfo(path.name, str(manifest.get("created_at") or ""), bool(manifest.get("usb_copy")),
+                                None if checks is None else all(c.ok for c in checks)))
     return sorted(found, key=lambda b: b.backup_id, reverse=True)
 
 
@@ -218,6 +264,7 @@ class UninstallFlow:
         self.backup_id: str | None = None
         self.backup_result: BackupResult | None = None
         self.gate_result: GateResult | None = None
+        self.executed_gate: GateResult | None = None  # gerbang yang dipakai eksekusi terakhir (acuan post-check)
         self.execution: ExecutionResult | None = None
         self.journal: Journal | None = None
         self._acknowledged = False
@@ -233,13 +280,16 @@ class UninstallFlow:
     def linux_backup_coverage(self) -> dict[str, str]:
         """UUID filesystem/LUKS -> backup Linux DistroRelay (M5) yang lolos verifikasi di drive eksternal.
 
-        Aturan backup bertingkat (a): partisi data yang UUID-nya tercatat di backup seperti ini tidak butuh
-        pernyataan yang diketik. Dihitung sekali per scan.
+        Hanya informasi. Backup Linux berisi daftar paket + dotfiles, bukan dokumen/foto/kode, dan partisi root
+        sering ikut memuat /home; jadi backup ini TIDAK menggantikan pernyataan "DATA SUDAH DIBACKUP" (keputusan
+        2026-10-22, setelah review). Dihitung sekali per scan, di `scan()` (thread kerja di TUI). Karena hanya
+        info, isinya dicek sebatas file ada + ukurannya cocok: arsip dotfiles bisa bergiga-giga.
         """
         if self._coverage is None:
             self._coverage = {}
             for root in self.deps.external_roots(self.report) if self.report else []:
-                for folder, manifest, problems in linux_backup.list_backups(Path(root) / "DistroRelay" / "linux-backups"):
+                backups = Path(root) / "DistroRelay" / "linux-backups"
+                for folder, manifest, problems in linux_backup.list_backups(backups, hashes=False):
                     if manifest and not problems:
                         for uuid in linux_backup.covered_uuids(manifest):
                             self._coverage.setdefault(uuid, f"{manifest.get('backup_id', folder.name)} di {root}")
@@ -289,6 +339,11 @@ class UninstallFlow:
         self.plan, self.unknown, self.preflight = None, [], None
         self.confirmed, self.backup_id, self.backup_result = set(), None, None
         self._coverage = None
+        try:
+            self.linux_backup_coverage()  # di sini, bukan saat partisi dicentang (itu di thread UI)
+        except OSError as exc:  # drive eksternal bermasalah: catatannya saja yang hilang
+            log.warning("Backup Linux di drive eksternal tidak terbaca: %s", exc)
+            self._coverage = {}
         self._changed()
         return self.report
 
@@ -325,9 +380,9 @@ class UninstallFlow:
             covered = self._covered_by(action) if action.data.get("needs_data_statement") else None
             if covered:
                 self.plan.warnings.append(
-                    f"Partisi {action.data['id']} tercakup backup Linux {covered} (UUID filesystem cocok), jadi "
-                    f"pernyataan {DATA_WORD} tidak diminta. Ingat: backup itu hanya daftar paket + dotfiles, "
-                    "bukan dokumen/foto/kode"
+                    f"Paket + dotfiles partisi {action.data['id']} sudah dibackup ({covered}, UUID filesystem cocok; "
+                    "file backup ada dengan ukuran yang benar, hash-nya dicek saat dipakai di Linux). "
+                    f"Itu bukan backup dokumen/foto/kode, jadi pernyataan {DATA_WORD} tetap diminta"
                 )
         self._changed()
         return self.plan
@@ -342,7 +397,7 @@ class UninstallFlow:
             required.append(
                 TypedConfirmation(f"id:{pid}", f"ID partisi {pid}", f"Ketik ID partisi yang akan dihapus ({pid})", pid)
             )
-            if action.data.get("needs_data_statement") and not self._covered_by(action):
+            if action.data.get("needs_data_statement"):
                 required.append(
                     TypedConfirmation(
                         f"data:{pid}",
@@ -409,7 +464,8 @@ class UninstallFlow:
         return list_backups(self.deps.backups_root)
 
     def use_backup(self, backup_id: str) -> None:
-        """Pakai backup yang sudah ada (CLI `--backup`). Gerbang tetap memverifikasinya ulang."""
+        """Pakai backup yang sudah ada (CLI `--backup`, berupa ID seperti 20261021-193000). Gerbang memverifikasi ulang
+        dan menolak ID yang bukan bentuk itu (mis. path folder)."""
         self.backup_id = backup_id
         self.backup_result = None
         self._changed()
@@ -487,12 +543,15 @@ class UninstallFlow:
     ) -> ExecutionResult:
         self._check_ticket(ticket)
         self._ticket = None  # sekali pakai
+        gate = self.executed_gate = self.gate_result
+        self._changed()  # gerbang lama tidak boleh menerbitkan tiket kedua setelah sistem berubah
         runner = execution_runner(self.deps.inner_runner, self.plan)
         session = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.journal = Journal.start(
             self.deps.journal_dir,
             session,
             {
+                "kind": "uninstall",
                 "where": self.mode,
                 "machine": self.machine.description if self.machine else "",
                 "backup": self.backup_id,
@@ -502,31 +561,43 @@ class UninstallFlow:
             },
         )
         extra = {"signature_of": self.deps.signature_of} if self.deps.signature_of else {}
-        with self.deps.mount_esp(runner, self.report.inventory.esp()) as mounted:
-            self.execution = execute_plan(
-                self.plan,
-                runner=runner,
-                esp_root=mounted.root,
-                manifest=self.gate_result.manifest,
-                journal=self.journal,
-                suspend_bitlocker=any(v.needs_recovery_key for v in self.report.bitlocker or []),
-                read_nvram=self.deps.read_nvram,
-                flush_bcd=self.deps.flush_bcd,
-                flush_volume=self.deps.flush_volume,
-                progress=progress,
-                fail_after=self.deps.fail_after,
-                stop=stop,
-                inventory=self.report.inventory,
-                load_inventory=self.deps.load_inventory,
-                **extra,
-            )
+        mounting = True
+        try:
+            with self.deps.mount_esp(runner, self.report.inventory.esp()) as mounted:
+                mounting = False
+                self.execution = execute_plan(
+                    self.plan,
+                    runner=runner,
+                    esp_root=mounted.root,
+                    manifest=gate.manifest,
+                    journal=self.journal,
+                    suspend_bitlocker=any(v.needs_recovery_key for v in self.report.bitlocker or []),
+                    read_nvram=self.deps.read_nvram,
+                    flush_bcd=self.deps.flush_bcd,
+                    flush_volume=self.deps.flush_volume,
+                    progress=progress,
+                    fail_after=self.deps.fail_after,
+                    stop=stop,
+                    inventory=self.report.inventory,
+                    load_inventory=self.deps.load_inventory,
+                    **extra,
+                )
+        except Exception as exc:
+            if not mounting:
+                raise
+            # Belum ada langkah yang jalan: sesi selesai-gagal tanpa perubahan, bukan TERPUTUS.
+            message = f"ESP gagal di-mount, tidak ada yang diubah: {type(exc).__name__}: {exc}"
+            self.journal.finish(False, message, changed=False)
+            if stop is not None:
+                stop.mark_done()
+            raise EspMountError(message) from exc
         return self.execution
 
     def post_check(self, progress: Callable[[str], None] | None = None) -> list[Verification]:
         if self.execution is None or self.journal is None:
             raise FlowError("Eksekusi dulu")
         after = self.deps.scan(progress=progress)
-        checks = post_check(self.plan, self.gate_result.manifest, self.report, after)
+        checks = post_check(self.plan, self.executed_gate.manifest, self.report, after)
         self.journal.post_check(all(c.ok for c in checks), [c.name for c in checks if not c.ok])
         return checks
 
@@ -590,8 +661,10 @@ class RestoreFlow:
         self.esp_items: list[str] = []
         self.entries: list[dict] = []
         self.partitions: list[disks.Partition] = []
+        self.journal: Journal | None = None  # journal pemulihan terakhir
         self._ticket: RestoreTicket | None = None
         self._generation = 0
+        self._mutated = False  # pemulihan terakhir sempat menjalankan perintah/menulis (bukan ditolak cek awal)
 
     def _changed(self) -> None:
         self._generation += 1
@@ -729,11 +802,24 @@ class RestoreFlow:
         )
         return self._ticket
 
-    def run(self, ticket: RestoreTicket | None, progress: Callable[[str], None] | None = None) -> list[Verification]:
+    def run(
+        self,
+        ticket: RestoreTicket | None,
+        progress: Callable[[str], None] | None = None,
+        stop: StopSignal | None = None,
+    ) -> list[Verification]:
+        """Jalankan pemulihan. Setiap langkah dicatat di journal (jenis "restore"); permintaan berhenti (Ctrl+C,
+        jendela ditutup) berlaku di antara langkah, jadi entri boot tidak tertinggal setengah jadi."""
         if ticket is None or ticket is not self._ticket or ticket.generation != self._generation:
             raise FlowError("Tiket pemulihan tidak berlaku: pilihan berubah sejak PULIHKAN diketik")
         self._ticket = None  # sekali pakai
-        say = progress or (lambda message: None)
+        stop = stop or StopSignal()
+        try:
+            return self._run(ticket, progress or (lambda message: None), stop)
+        finally:
+            stop.mark_done()  # penangan "jendela ditutup" menunggu titik ini
+
+    def _run(self, ticket: RestoreTicket, say: Callable[[str], None], stop: StopSignal) -> list[Verification]:
         directory = self._require_backup()
 
         # Backup dibaca lagi tepat sebelum dipakai: isinya bisa berubah sejak dipilih.
@@ -748,69 +834,120 @@ class RestoreFlow:
         disk_guid = {d.number: d.guid for d in self.backup_layout.disks}
         scripts = frozenset(partition_restore_script(p, disk_guid[p.disk_number]) for p in self.partitions)
         runner, created = restore_runner(self.deps.inner_runner, scripts)
+        if stop.requested():
+            return [Verification("Dihentikan", False, f"{stop.reason} sebelum langkah pertama; tidak ada yang diubah")]
+        journal = self.journal = Journal.start(
+            self.deps.journal_dir,
+            datetime.now().strftime("%Y%m%d-%H%M%S"),
+            {"kind": "restore", "backup": self.backup_id, "esp_items": list(self.esp_items),
+             "entries": [entry_label(r) for r in self.entries], "partitions": [p.id for p in self.partitions]},
+        )
         results: list[Verification] = []
-        if self.partitions:
-            results += self._restore_partitions(runner, disk_guid, say)
-        if self.esp_items:
-            esp = self.deps.load_inventory(runner).esp()
-            expected = (manifest.get("esp_partition") or {}).get("guid") or ""
-            if esp is None:
-                results.append(Verification("ESP", False, "ESP tidak ditemukan"))
-            elif expected and esp.guid.lower() != expected.lower():
-                results.append(
-                    Verification("ESP sama dengan saat backup", False, f"GUID ESP sekarang {esp.guid}, di backup {expected}")
-                )
-            else:
-                say("Memulihkan folder/file ESP…")
-                with self.deps.mount_esp(runner, esp) as mounted:
-                    results += restore_esp_items(directory, self.esp_items, mounted.root)
-                    results.append(_durable("Folder/file ESP ditulis ke disk", lambda: self.deps.flush_volume(mounted.root)))
-        for record in self.entries:
-            say(f"Membuat ulang entri {describe_entry(record)}…")
-            results.append(restore_boot_entry(runner, created, record))
-        if self.entries:
-            results.append(_durable("BCD ditulis ke disk", self.deps.flush_bcd))
-        return results
-
-    def _restore_partitions(self, runner: Runner, disk_guid: dict, say: Callable[[str], None]) -> list[Verification]:
-        """Buat ulang entri GPT, lalu pastikan isinya utuh: UUID filesystem sama dengan saat backup."""
-        results: list[Verification] = []
+        self._mutated = False
+        steps: list[tuple[str, str, Callable[[], list[Verification]]]] = []
         restored: list[tuple[disks.Partition, str]] = []  # (partisi di backup, GUID disk)
         for part in self.partitions:
-            label = f"Pulihkan partisi {part.id}"
-            current = self.deps.load_inventory(runner)  # dicek ulang tepat sebelum dibuat
-            reason = partition_restore_refusal(part, self.backup_layout, current)
-            if reason:
-                results.append(Verification(label, False, reason))
-                continue
-            say(f"Membuat ulang partisi {part.id}…")
-            done = runner.run(powershell_args(partition_restore_script(part, disk_guid[part.disk_number])))
-            if not done.ok:
-                results.append(Verification(label, False, f"New-Partition gagal: {done.output() or done.returncode}"))
-                continue
-            after = self.deps.load_inventory(runner)
-            found = _partition_at(after, disk_guid[part.disk_number], part)
-            if found is None:
-                results.append(Verification(label, False, "Partisi tidak terlihat dengan offset/ukuran/tipe yang sama"))
-                continue
-            results.append(Verification(label, True, f"Dibuat ulang sebagai {found.id} (GUID partisi baru {found.guid})"))
-            restored.append((part, disk_guid[part.disk_number]))
+            steps.append(("restore-partition", part.id,
+                          lambda part=part: self._restore_partition(runner, disk_guid, part, restored, say)))
+        if self.partitions:
+            steps.append(("check-partitions", "", lambda: self._check_restored(restored, say)))
+        if self.esp_items:
+            steps.append(("restore-esp", ", ".join(self.esp_items), lambda: self._restore_esp(runner, directory, manifest, say)))
+        for record in self.entries:
+            def restore_entry(record=record) -> list[Verification]:
+                say(f"Membuat ulang entri {describe_entry(record)}…")
+                self._mutated = True
+                return [restore_boot_entry(runner, created, record),
+                        _durable("BCD ditulis ke disk", self.deps.flush_bcd)]
+            steps.append(("restore-boot-entry", entry_label(record), restore_entry))
 
-        if restored:
-            say("Memeriksa isi partisi (scan ulang)…")
-            report = self.deps.scan()
-            for part, guid in restored:
-                expected = (self.backup_fsinfo.get(part.id) or {}).get("uuid")
-                found = _partition_at(report.inventory, guid, part) if report.inventory else None
-                info = report.fsinfo.get(found.id) if found else None
-                label = f"Isi partisi {part.id} utuh"
-                if not expected:
-                    results.append(Verification(label, True, "UUID filesystem tidak tercatat di backup ini (backup lama); "
-                                                             f"sekarang terbaca: {info.describe() if info else 'tidak dikenali'}"))
-                elif info is not None and info.uuid == expected:
-                    results.append(Verification(label, True, f"UUID filesystem sama ({expected})"))
-                else:
-                    now = info.uuid if info else "tidak terbaca"
-                    results.append(Verification(label, False, f"UUID filesystem {now}, di backup {expected}; "
-                                                              "ruangnya mungkin sudah ditimpa"))
+        for number, (kind, ref, action) in enumerate(steps, 1):
+            if stop.requested():
+                message = (f"{stop.reason} setelah langkah {number - 1} dari {len(steps)}; sisanya belum dipulihkan"
+                           if number > 1 else f"{stop.reason} sebelum langkah pertama; tidak ada yang diubah")
+                results.append(Verification("Dihentikan", False, message))
+                journal.finish(False, message, changed=False if not self._mutated else None)
+                return results
+            journal.record(number, kind, ref, "started")
+            stop.step_started()
+            try:
+                outcome = action()
+            except Exception as exc:  # error tak terduga: catat, lalu hentikan sisa pemulihan
+                log.exception("Pemulihan langkah %s (%s) gagal", number, kind)
+                text = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    text = (f"perintah tidak selesai dalam {exc.timeout:.0f} detik; STATUS TIDAK DIKETAHUI (mungkin sudah "
+                            "jalan sebagian). Scan ulang dan periksa sebelum melanjutkan")
+                journal.record(number, kind, ref, "failed", text)
+                journal.finish(False, f"Berhenti di langkah {number}: {text}")
+                results.append(Verification(f"Langkah {number} ({kind})", False, text))
+                return results
+            finally:
+                stop.step_finished()
+            ok = all(v.ok for v in outcome)
+            journal.record(number, kind, ref, "done" if ok else "failed",
+                           "; ".join(f"{v.name}: {v.message}" for v in outcome if not v.ok)[:500])
+            results += outcome
+        failed_names = [v.name for v in results if not v.ok]
+        journal.post_check(not failed_names, failed_names)
+        journal.finish(not failed_names, "Semua langkah pemulihan selesai" if not failed_names else "Ada yang gagal dipulihkan",
+                       changed=False if not self._mutated else None)
+        return results
+
+    def _restore_esp(self, runner: Runner, directory: Path, manifest: dict, say: Callable[[str], None]) -> list[Verification]:
+        esp = self.deps.load_inventory(runner).esp()
+        expected = (manifest.get("esp_partition") or {}).get("guid") or ""
+        if esp is None:
+            return [Verification("ESP", False, "ESP tidak ditemukan")]
+        if expected and esp.guid.lower() != expected.lower():
+            return [Verification("ESP sama dengan saat backup", False, f"GUID ESP sekarang {esp.guid}, di backup {expected}")]
+        say("Memulihkan folder/file ESP…")
+        self._mutated = True
+        with self.deps.mount_esp(runner, esp) as mounted:
+            results = restore_esp_items(directory, self.esp_items, mounted.root)
+            results.append(_durable("Folder/file ESP ditulis ke disk", lambda: self.deps.flush_volume(mounted.root)))
+        return results
+
+    def _restore_partition(
+        self, runner: Runner, disk_guid: dict, part: disks.Partition, restored: list, say: Callable[[str], None]
+    ) -> list[Verification]:
+        """Buat ulang satu entri GPT dengan offset/ukuran/tipe yang sama persis."""
+        label = f"Pulihkan partisi {part.id}"
+        current = self.deps.load_inventory(runner)  # dicek ulang tepat sebelum dibuat
+        reason = partition_restore_refusal(part, self.backup_layout, current)
+        if reason:
+            return [Verification(label, False, reason)]
+        say(f"Membuat ulang partisi {part.id}…")
+        self._mutated = True
+        done = runner.run(powershell_args(partition_restore_script(part, disk_guid[part.disk_number])))
+        if not done.ok:
+            return [Verification(label, False, f"New-Partition gagal: {done.output() or done.returncode}")]
+        after = self.deps.load_inventory(runner)
+        found = _partition_at(after, disk_guid[part.disk_number], part)
+        if found is None:
+            return [Verification(label, False, "Partisi tidak terlihat dengan offset/ukuran/tipe yang sama")]
+        restored.append((part, disk_guid[part.disk_number]))
+        return [Verification(label, True, f"Dibuat ulang sebagai {found.id} (GUID partisi baru {found.guid})")]
+
+    def _check_restored(self, restored: list, say: Callable[[str], None]) -> list[Verification]:
+        """Pastikan isi partisi yang dibuat ulang utuh: UUID filesystem sama dengan saat backup."""
+        if not restored:
+            return []
+        say("Memeriksa isi partisi (scan ulang)…")
+        report = self.deps.scan()
+        results: list[Verification] = []
+        for part, guid in restored:
+            expected = (self.backup_fsinfo.get(part.id) or {}).get("uuid")
+            found = _partition_at(report.inventory, guid, part) if report.inventory else None
+            info = report.fsinfo.get(found.id) if found else None
+            label = f"Isi partisi {part.id} utuh"
+            if not expected:
+                results.append(Verification(label, True, "UUID filesystem tidak tercatat di backup ini (backup lama); "
+                                                         f"sekarang terbaca: {info.describe() if info else 'tidak dikenali'}"))
+            elif info is not None and info.uuid == expected:
+                results.append(Verification(label, True, f"UUID filesystem sama ({expected})"))
+            else:
+                now = info.uuid if info else "tidak terbaca"
+                results.append(Verification(label, False, f"UUID filesystem {now}, di backup {expected}; "
+                                                          "ruangnya mungkin sudah ditimpa"))
         return results

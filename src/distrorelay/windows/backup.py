@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -25,19 +26,32 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .. import __version__
+from ..hashing import sha256_file
 from ..paths import app_data_dir
 from .bootentries import parse_firmware
 from .disks import Partition, parse_inventory
 from .esp import MountedEsp
 from .nvram import snapshot_from_raw
-from .runner import AllowListRunner, Runner
+from .runner import AllowListRunner, Runner, program_name
 from .preflight import M2A_CMDLETS
 from .scanner import ScanReport
+from .uncached import sha256_uncached
 
 log = logging.getLogger(__name__)
 
 _SKIP_DIRS = {"system volume information"}
+# ID backup = waktu pembuatan (create_backup). Hanya bentuk ini yang diterima, bukan path: Path(root) / "C:\\..." akan
+# membuang root-nya, sehingga "salinan eksternal" bisa diam-diam menunjuk ke salinan lokal yang sama.
+BACKUP_ID = re.compile(r"^\d{8}-\d{6}$")
+# File ESP yang memang tidak bisa dibaca saat Windows jalan (hive BCD); dicadangkan lewat bcdedit /export.
+_LOCKED_ESP_FILE = re.compile(r"^efi\\microsoft\\boot\\bcd(\.log\d*)?$", re.IGNORECASE)
+
+
 _CHUNK = 1024 * 1024
+
+
+def valid_backup_id(backup_id: str | None) -> bool:
+    return bool(backup_id) and BACKUP_ID.fullmatch(backup_id) is not None
 
 
 class BackupError(RuntimeError):
@@ -53,7 +67,7 @@ def export_rule(root: Path) -> Callable[[Sequence[str]], bool]:
     allowed = Path(root).resolve()
 
     def rule(args: Sequence[str]) -> bool:
-        if len(args) != 3 or Path(args[0]).stem.lower() != "bcdedit" or args[1].lower() != "/export":
+        if len(args) != 3 or program_name(args) != "bcdedit" or args[1].lower() != "/export":
             return False
         target = Path(args[2]).resolve()
         return allowed == target or allowed in target.parents
@@ -94,14 +108,6 @@ class BackupResult:
     @property
     def ok(self) -> bool:
         return bool(self.verifications) and all(v.ok for v in self.verifications)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def zip_tree(root: Path, zip_path: Path, opener: Callable = open) -> tuple[list[dict], list[str]]:
@@ -160,42 +166,66 @@ def verify_zip(zip_path: Path, expected: list[dict]) -> Verification:
     return Verification("Isi esp.zip", True, f"{len(expected)} file dibaca ulang dari zip, semua hash cocok")
 
 
-def verify_files(directory: Path, files: list[BackupFile], label: str) -> Verification:
+def verify_files(directory: Path, files: list[BackupFile], label: str, hasher: Callable = sha256_file) -> Verification:
     mismatched = []
     for f in files:
         path = directory / f.name
-        if not path.exists() or sha256_file(path) != f.sha256:
-            mismatched.append(f.name)
+        try:
+            if not path.exists() or hasher(path) != f.sha256:
+                mismatched.append(f.name)
+        except OSError as exc:  # mis. sektor rusak saat dibaca langsung dari perangkat
+            mismatched.append(f"{f.name} (tidak terbaca: {exc.strerror or exc})")
     if mismatched:
         return Verification(label, False, f"Tidak cocok/hilang: {', '.join(mismatched)}")
     return Verification(label, True, f"{len(files)} file dibaca ulang, semua hash cocok")
 
 
-def verify_tree(directory: Path, expected: list[dict], label: str) -> Verification:
+def verify_tree(directory: Path, expected: list[dict], label: str, hasher: Callable = sha256_file) -> Verification:
     mismatched = []
     for entry in expected:
         path = directory.joinpath(*entry["path"].split("\\"))
-        if not path.exists() or sha256_file(path) != entry["sha256"]:
-            mismatched.append(entry["path"])
+        try:
+            if not path.exists() or hasher(path) != entry["sha256"]:
+                mismatched.append(entry["path"])
+        except OSError as exc:
+            mismatched.append(f"{entry['path']} (tidak terbaca: {exc.strerror or exc})")
     if mismatched:
         return Verification(label, False, f"{len(mismatched)} file tidak cocok/hilang, mis. {mismatched[0]}")
     return Verification(label, True, f"{len(expected)} file dibaca ulang, semua hash cocok")
 
 
-def verify_backup_dir(directory: Path) -> list[Verification]:
-    """Verifikasi ulang folder backup (lokal atau USB) terhadap manifest.json-nya."""
+def verify_backup_dir(directory: Path, hasher: Callable = sha256_file) -> list[Verification]:
+    """Verifikasi ulang folder backup (lokal atau USB) terhadap manifest.json-nya.
+
+    Untuk salinan di drive eksternal, pakai `hasher=sha256_uncached` supaya yang dibaca isi perangkatnya, bukan cache.
+    """
     directory = Path(directory)
     try:
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [Verification("manifest.json", False, f"Tidak bisa dibaca: {exc}")]
-    files = [BackupFile(**f) for f in manifest.get("files", [])]
-    checks = [verify_files(directory, files, "Hash file backup")]
+    if not isinstance(manifest, dict):
+        return [Verification("manifest.json", False, "Bukan objek JSON")]
+    try:
+        files = [BackupFile(**f) for f in manifest.get("files", [])]
+    except TypeError as exc:
+        return [Verification("manifest.json", False, f"Daftar file rusak: {exc}")]
+    checks = [verify_files(directory, files, "Hash file backup", hasher)]
     if (directory / "esp.zip").exists():
         checks.append(verify_zip(directory / "esp.zip", manifest.get("esp_files", [])))
     if (directory / "esp").is_dir():
-        checks.append(verify_tree(directory / "esp", manifest.get("esp_files", []), "Folder esp\\"))
+        checks.append(verify_tree(directory / "esp", manifest.get("esp_files", []), "Folder esp\\", hasher))
     return checks
+
+
+def creation_checks(directory: Path) -> list[Verification] | None:
+    """Hasil verifikasi saat backup dibuat (verification.json): BCD store terbaca, salinan USB, file ESP yang tidak
+    bisa dibaca, dst. Sebagian cek itu tidak bisa diulang dari isi folder saja. None = tidak ada / rusak."""
+    try:
+        data = json.loads((Path(directory) / "verification.json").read_text(encoding="utf-8"))
+        return [Verification(str(v["name"]), bool(v["ok"]), str(v.get("message", ""))) for v in data]
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 def create_backup(
@@ -220,10 +250,45 @@ def create_backup(
         raise BackupError("ESP tidak ditemukan")
 
     backup_id = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    local = (local_root or backups_root()) / backup_id
-    local.mkdir(parents=True, exist_ok=False)
-    result = BackupResult(backup_id, str(local), None, local_only=local_only)
+    root = local_root or backups_root()
+    final = root / backup_id
+    if final.exists():
+        raise BackupError(f"Backup {backup_id} sudah ada; tunggu sebentar lalu ulangi")
+    # Dibangun di folder sementara dan baru diberi nama ID setelah selesai: backup yang gagal di tengah tidak
+    # meninggalkan folder setengah jadi (esp.zip ratusan MB) yang tampak seperti backup.
+    local = root / f".{backup_id}.tmp"
+    shutil.rmtree(local, ignore_errors=True)
+    local.mkdir(parents=True)
+    result = BackupResult(backup_id, str(final), None, local_only=local_only)
+    try:
+        _write_backup(report, runner, mount_esp, esp_part, local, result, usb_root=usb_root, local_only=local_only,
+                      opener=opener, say=say, now=now)
+    except BaseException:
+        shutil.rmtree(local, ignore_errors=True)
+        raise
+    try:
+        local.rename(final)
+    except OSError as exc:
+        raise BackupError(f"Backup selesai di {local}, tapi tidak bisa diberi nama {backup_id}: {exc}") from exc
+    return result
 
+
+def _write_backup(
+    report: ScanReport,
+    runner: Runner,
+    mount_esp: Callable[[Runner, Partition], AbstractContextManager[MountedEsp]],
+    esp_part: Partition,
+    local: Path,
+    result: BackupResult,
+    *,
+    usb_root: Path | None,
+    local_only: bool,
+    opener: Callable,
+    say: Callable[[str], None],
+    now: datetime | None,
+) -> None:
+    """Isi folder backup `local` (masih sementara) dan verifikasinya; hasilnya dicatat di `result`."""
+    backup_id = result.backup_id
     say("Menyalin seluruh isi ESP ke esp.zip…")
     with mount_esp(runner, esp_part) as mounted:
         result.esp_files, result.skipped = zip_tree(mounted.root, local / "esp.zip", opener)
@@ -268,10 +333,17 @@ def create_backup(
     scanned = {f.path.lower(): f.sha256 for f in report.esp.files}
     changed = [e["path"] for e in result.esp_files if scanned.get(e["path"].lower()) not in (None, e["sha256"])]
     added = [e["path"] for e in result.esp_files if e["path"].lower() not in scanned]
-    if changed or added:
-        checks.append(Verification("ESP sama dengan saat scan", False, f"Berubah sejak scan: {(changed + added)[:3]}; scan ulang"))
+    backed = {e["path"].lower() for e in result.esp_files} | {p.lower() for p in result.skipped}
+    removed = [p for p in scanned if p not in backed]
+    unreadable = [p for p in result.skipped if not _LOCKED_ESP_FILE.match(p)]
+    if changed or added or removed:
+        checks.append(Verification("ESP sama dengan saat scan", False,
+                                   f"Berubah sejak scan: {(changed + added + removed)[:3]}; scan ulang"))
     else:
         checks.append(Verification("ESP sama dengan saat scan", True, "Semua file sama dengan hasil scan"))
+    if unreadable:
+        checks.append(Verification("Semua file ESP tercadang", False,
+                                   f"Tidak bisa dibaca saat backup: {unreadable[:3]}; tutup program yang memakainya lalu ulangi"))
 
     # bcdedit /store me-load file sebagai registry hive dan memperbarui header-nya, jadi yang dibaca
     # adalah salinan sementara. File backup itu sendiri tidak boleh berubah setelah hash-nya dicatat.
@@ -317,13 +389,14 @@ def create_backup(
             )
         else:
             result.usb_dir = str(usb)
-            say("Memverifikasi salinan di drive eksternal…")
-            checks.append(verify_files(usb, result.files, "Hash salinan USB"))
-            checks.append(verify_tree(usb / "esp", result.esp_files, "Folder esp\\ di USB (untuk xcopy dari WinRE)"))
+            say("Memverifikasi salinan di drive eksternal (dibaca langsung dari perangkat)…")
+            checks.append(verify_files(usb, result.files + [BackupFile("manifest.json", 0, sha256_file(local / "manifest.json"))],
+                                       "Hash salinan USB", sha256_uncached))
+            checks.append(verify_tree(usb / "esp", result.esp_files, "Folder esp\\ di USB (untuk xcopy dari WinRE)",
+                                      sha256_uncached))
     elif not local_only:
         checks.append(Verification("Salinan USB", False, "Tidak ada USB tujuan; backup hanya ada di C:"))
 
     (local / "verification.json").write_text(
         json.dumps([dataclasses.asdict(v) for v in checks], indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    return result

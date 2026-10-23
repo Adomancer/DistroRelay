@@ -48,7 +48,8 @@ def test_all_three_leftovers_in_safe_order(tmp_path):
 def test_arch_alone_does_not_touch_fedoras_fallback(tmp_path):
     plan, _ = plan_for(tmp_path, "efi:arch")
     assert [a.kind for a in plan.actions] == ["set-windows-first", "delete-boot-entry", "delete-esp-item"]
-    assert any("bootx64.efi bukan milik Windows" in w for w in plan.warnings)
+    assert any("bootx64.efi bukan salinan bootmgfw.efi" in w and "folder Linux lain" in w and "fedora" in w
+               for w in plan.warnings)
 
 
 def test_folder_without_its_entry_warns_and_still_restores_fallback(tmp_path):

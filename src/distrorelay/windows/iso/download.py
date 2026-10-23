@@ -7,6 +7,7 @@ diulang dari awal. Isi file tidak dipercaya di sini; verifikasinya di `verify.py
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import logging
 import re
@@ -50,6 +51,29 @@ def _check_scheme(url: str, require_https: bool) -> None:
         raise DownloadError(f"Hanya HTTPS yang dipakai: {url}")
 
 
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib bawaan mengikuti redirect dari HTTPS ke HTTP. Isi ISO tetap dicek GPG + SHA256, tapi feed versi lewat
+    HTTP bisa diganti di jalan (mis. diturunkan ke rilis lama yang tanda tangannya masih sah)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.lower().startswith("https://"):
+            raise DownloadError(f"Server mengalihkan {req.full_url} ke alamat non-HTTPS ({newurl}); dibatalkan")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_HTTPS_ONLY = urllib.request.build_opener(HttpsOnlyRedirect)
+
+
+def _open(request: urllib.request.Request, timeout: float, require_https: bool):
+    if not require_https:
+        return urllib.request.urlopen(request, timeout=timeout)
+    response = _HTTPS_ONLY.open(request, timeout=timeout)
+    if not response.geturl().lower().startswith("https://"):
+        response.close()
+        raise DownloadError(f"{request.full_url} berakhir di alamat non-HTTPS ({response.geturl()}); dibatalkan")
+    return response
+
+
 _TRANSIENT_HTTP = (408, 429, 500, 502, 503, 504)
 
 
@@ -57,7 +81,7 @@ def fetch(
     url: str,
     *,
     limit: int = SMALL_LIMIT,
-    timeout: float = 60,
+    timeout: float = 20,  # feed & checksum kecil; 60 dtk x 3 percobaan membuat `iso check` menggantung lama
     require_https: bool = True,
     retries: int = 2,
     backoff: float = 2.0,
@@ -66,7 +90,7 @@ def fetch(
     _check_scheme(url, require_https)
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(_request(url), timeout=timeout) as response:
+            with _open(_request(url), timeout, require_https) as response:
                 data = response.read(limit + 1)
             break
         except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
@@ -93,8 +117,13 @@ def download(
     backoff: float = 2.0,
     timeout: float = 60,
     require_https: bool = True,
+    on_sha256: Callable[[str], None] | None = None,
 ) -> Path:
-    """Unduh `url` ke `dest`, melanjutkan `dest.part` kalau ada. Mengembalikan `dest`."""
+    """Unduh `url` ke `dest`, melanjutkan `dest.part` kalau ada. Mengembalikan `dest`.
+
+    `on_sha256(hex)` menerima SHA256 isi file yang ditulis, dihitung sambil mengunduh, supaya ISO besar tidak perlu
+    dibaca ulang hanya untuk di-hash.
+    """
     _check_scheme(url, require_https)
     dest = Path(dest)
     part = dest.with_name(dest.name + ".part")
@@ -102,8 +131,11 @@ def download(
     attempt = 0
     while True:
         try:
-            if _download_once(url, part, expected_size, progress, should_stop, timeout):
+            digest = _download_once(url, part, expected_size, progress, should_stop, timeout, require_https)
+            if digest is not None:
                 part.replace(dest)
+                if on_sha256 is not None:
+                    on_sha256(digest)
                 return dest
         except DownloadStopped:
             raise
@@ -119,24 +151,33 @@ def download(
         attempt += 1
 
 
-def _download_once(url, part: Path, expected_size, progress, should_stop, timeout) -> bool:
-    """True kalau file lengkap. Error koneksi diteruskan ke pemanggil supaya dicoba lagi."""
+def _sha256_of(path: Path) -> "hashlib._Hash":
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(CHUNK), b""):
+            digest.update(chunk)
+    return digest
+
+
+def _download_once(url, part: Path, expected_size, progress, should_stop, timeout, require_https=True) -> str | None:
+    """SHA256 isi file kalau sudah lengkap, None kalau harus diulang dari awal. Error koneksi diteruskan ke
+    pemanggil supaya dicoba lagi."""
     have = part.stat().st_size if part.exists() else 0
     if expected_size is not None and have > expected_size:
         part.unlink()
         have = 0
     if expected_size is not None and have == expected_size and have:
-        return True
+        return _sha256_of(part).hexdigest()
     try:
-        response = urllib.request.urlopen(_request(url, have), timeout=timeout)
+        response = _open(_request(url, have), timeout, require_https)
     except urllib.error.HTTPError as exc:
         if exc.code == 416 and have:
             # Range di luar ukuran file: .part sudah lengkap, atau file di server berganti. Ulang dari awal
             # kecuali ukurannya tepat seperti yang diharapkan.
             if expected_size is not None and have == expected_size:
-                return True
+                return _sha256_of(part).hexdigest()
             part.unlink()
-            return False
+            return None
         raise
     with response:
         status = response.status
@@ -159,6 +200,8 @@ def _download_once(url, part: Path, expected_size, progress, should_stop, timeou
                 f"Ukuran file di server ({total} byte) tidak sama dengan feed ({expected_size} byte); dibatalkan"
             )
         total = total if total is not None else expected_size
+        # Bagian yang dilanjutkan di-hash sekali dulu; sisanya di-hash sambil ditulis.
+        digest = _sha256_of(part) if mode == "ab" else hashlib.sha256()
         with open(part, mode) as handle:
             while True:
                 if should_stop is not None and should_stop():
@@ -167,6 +210,7 @@ def _download_once(url, part: Path, expected_size, progress, should_stop, timeou
                 if not block:
                     break
                 handle.write(block)
+                digest.update(block)
                 have += len(block)
                 if progress is not None:
                     progress(have, total)
@@ -175,4 +219,4 @@ def _download_once(url, part: Path, expected_size, progress, should_stop, timeou
     if total is not None and have > total:
         part.unlink()
         raise DownloadError(f"Server mengirim lebih dari {total} byte; unduhan dibuang")
-    return True
+    return digest.hexdigest()

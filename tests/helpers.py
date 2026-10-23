@@ -40,7 +40,7 @@ def add_partition(inventory: disks.DiskInventory, number: int, gpt_type: str, gu
     part = disks.Partition(
         disk_number=0,
         number=number,
-        guid=guid,
+        guid=gpt_types.normalize_guid(guid),
         gpt_type=gpt_type,
         type_name=info.name,
         category=info.category,
@@ -480,3 +480,11 @@ def laptop_esp_files() -> dict[str, bytes | str]:
         "EFI\\fedora\\BOOTX64.CSV": FEDORA_CSV,
         "EFI\\fedora\\grub.cfg": FEDORA_STUB,
     }
+
+
+def gpt_slots_like_windows(inventory: disks.DiskInventory) -> dict[int, dict[int, str]]:
+    """Tabel slot GPT tanpa slot kosong (nomor slot = nomor partisi Windows), seperti disk laptop asli."""
+    slots: dict[int, dict[int, str]] = {}
+    for part in inventory.partitions:
+        slots.setdefault(part.disk_number, {})[part.number] = part.guid
+    return slots

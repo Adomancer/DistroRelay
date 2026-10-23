@@ -57,6 +57,16 @@ def powershell_args(script: str) -> list[str]:
     ]
 
 
+def ps_string(value: str) -> str:
+    """Ekspresi PowerShell untuk teks dari luar (mis. path file di flashdisk), dikirim sebagai base64 UTF-8.
+
+    Menggandakan ' saja tidak cukup: PowerShell juga membaca kutip tipografis (U+2018..U+201B) sebagai tanda kutip,
+    jadi nama file berisi kutip itu bisa keluar dari string. Base64 tidak punya karakter kutip sama sekali.
+    """
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded}')))"
+
+
 def decode_powershell(args: Sequence[str]) -> str | None:
     """Isi script kalau `args` dibuat oleh `powershell_args`, selain itu None."""
     if not args or _exe_name(args[0]) != "powershell":
@@ -81,6 +91,11 @@ def command_key(args: Sequence[str]) -> str:
 def _exe_name(arg0: str) -> str:
     name = re.split(r"[\\/]", arg0)[-1].lower()
     return name[:-4] if name.endswith(".exe") else name
+
+
+def program_name(args: Sequence[str]) -> str:
+    """'C:\\Windows\\System32\\bcdedit.exe /delete …' -> 'bcdedit'; '' untuk perintah kosong. Untuk aturan allowlist."""
+    return _exe_name(args[0]) if args else ""
 
 
 def console_encoding() -> str:
@@ -169,6 +184,13 @@ _DRIVE = re.compile(r"^[a-z]:\\?$", re.IGNORECASE)
 
 
 _SINGLE_QUOTED = re.compile(r"'(?:[^']|'')*'")
+# Kutip tipografis juga dibaca PowerShell sebagai tanda kutip; script DistroRelay sendiri tidak pernah memakainya.
+_TYPOGRAPHIC_QUOTES = re.compile("[‘’‚‛“”„]")
+# Pemanggilan statis .NET ([Tipe]::Anggota) tidak berbentuk cmdlet, jadi dibatasi ke tipe yang memang dipakai.
+_DOTNET_STATIC = re.compile(r"\[\s*([A-Za-z_][\w.]*)\s*\]\s*::")
+ALLOWED_DOTNET_TYPES = frozenset(
+    {"console", "system.console", "text.encoding", "system.text.encoding", "convert", "system.convert"}
+)
 # Alias pengubah/pengeksekusi dan operator pemanggil, yang tidak berbentuk Kata-Kata.
 _DANGEROUS_ALIAS = re.compile(r"\b(rm|del|erase|rd|rmdir|ri|mv|move|ren|rni|cp|cpi|copy|ni|sc|iex|icm|saps|start|kill|spps)\b", re.IGNORECASE)
 _CALL_OPERATOR = re.compile(r"&\s*['\"$({]")
@@ -176,9 +198,14 @@ _CALL_OPERATOR = re.compile(r"&\s*['\"$({]")
 
 def check_powershell(script: str, allowed: frozenset[str] = ALLOWED_CMDLETS) -> None:
     """Penjaga lapis tambahan untuk script DistroRelay sendiri (bukan sandbox untuk script asing)."""
+    if _TYPOGRAPHIC_QUOTES.search(script):
+        raise ReadOnlyViolation("Script PowerShell memuat tanda kutip tipografis")
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     # Isi string '...' (path file, dengan ' digandakan) bukan kode, jadi tidak ikut dipindai.
     code = _SINGLE_QUOTED.sub("''", code)
+    for match in _DOTNET_STATIC.finditer(code):
+        if match.group(1).lower() not in ALLOWED_DOTNET_TYPES:
+            raise ReadOnlyViolation(f"Script PowerShell memanggil .NET yang tidak diizinkan: [{match.group(1)}]::")
     alias = _DANGEROUS_ALIAS.search(code)
     if alias:
         raise ReadOnlyViolation(f"Script PowerShell memakai alias yang tidak diizinkan: {alias.group(0)}")

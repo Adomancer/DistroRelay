@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import sys
@@ -11,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from ..hashing import sha256_file
 from .disks import Partition
 from .runner import Runner
 
@@ -82,12 +82,22 @@ def norm_path(path: str) -> str:
     return path.replace("/", "\\").strip("\\")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def contained_path(root: Path, rel: str) -> Path:
+    """Path absolut untuk `rel` (relatif terhadap root ESP) yang pasti berada di bawah `root`.
+
+    ValueError kalau ada bagian '.', '..', atau yang memuat ':' (huruf drive seperti 'C:', atau alternate data stream),
+    atau kalau hasil resolve keluar dari `root`. Dipakai untuk path yang berasal dari file (manifest backup), bukan
+    hanya dari scan.
+    """
+    norm = norm_path(rel)
+    parts = norm.split("\\") if norm else []
+    if not parts or any(p in ("", ".", "..") or ":" in p for p in parts):
+        raise ValueError(f"{rel!r}: path tidak valid")
+    base = Path(root).resolve()
+    target = (base / Path(*parts)).resolve()
+    if target == base or base not in target.parents:
+        raise ValueError(f"{rel!r}: berada di luar {base}")
+    return target
 
 
 def scan_tree(root: Path) -> tuple[list[EspFile], list[str], list[str]]:
@@ -104,7 +114,7 @@ def scan_tree(root: Path) -> tuple[list[EspFile], list[str], list[str]]:
             full = Path(dirpath) / name
             rel = "\\".join((rel_dir / name).parts)
             try:
-                files.append(EspFile(rel, full.stat().st_size, _sha256(full)))
+                files.append(EspFile(rel, full.stat().st_size, sha256_file(full)))
             except OSError as exc:
                 log.warning("ESP: gagal membaca %s: %s", full, exc)
                 unreadable.append(rel)

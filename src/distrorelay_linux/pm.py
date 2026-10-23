@@ -27,6 +27,14 @@ class Backend:
     def install(self, packages: Sequence[str], is_root: bool) -> Command:
         raise NotImplementedError
 
+    def prepare_each(self, is_root: bool) -> list[Command]:
+        """Dijalankan sekali sebelum paket dicoba satu per satu (setelah pemasangan sekaligus gagal)."""
+        return []
+
+    def install_one(self, packages: Sequence[str], is_root: bool) -> Command:
+        """Perintah per paket di fallback satu per satu."""
+        return self.install(packages, is_root)
+
 
 class Dnf(Backend):
     family, name = "fedora", "dnf"
@@ -42,6 +50,13 @@ class Pacman(Backend):
         # -Syu sekaligus: memasang dengan -Sy tanpa -u = "partial upgrade", tidak didukung Arch.
         return as_root(["pacman", "-Syu", "--needed", "--noconfirm", *packages], is_root)
 
+    def prepare_each(self, is_root):
+        # Sinkron + upgrade sekali; sesudahnya -S per paket aman dari partial upgrade (sistem sudah terbaru).
+        return [as_root(["pacman", "-Syu", "--noconfirm"], is_root)]
+
+    def install_one(self, packages, is_root):
+        return as_root(["pacman", "-S", "--needed", "--noconfirm", *packages], is_root)
+
 
 class Apt(Backend):
     family, name = "debian", "apt"
@@ -50,7 +65,10 @@ class Apt(Backend):
         return [as_root(["apt-get", "update"], is_root)]
 
     def install(self, packages, is_root):
-        return as_root(["apt-get", "install", "-y", *packages], is_root, env={"DEBIAN_FRONTEND": "noninteractive"})
+        # --no-remove: dengan -y, apt menyelesaikan konflik dengan MENGHAPUS paket lain tanpa bertanya
+        # (mis. pipewire-pulse menghapus pulseaudio). Setup hanya boleh menambah, jadi lebih baik gagal.
+        return as_root(["apt-get", "install", "-y", "--no-remove", *packages], is_root,
+                       env={"DEBIAN_FRONTEND": "noninteractive"})
 
 
 _BACKENDS = {b.family: b for b in (Dnf(), Pacman(), Apt())}

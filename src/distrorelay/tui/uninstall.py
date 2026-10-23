@@ -42,11 +42,11 @@ def first_screen(flow: UninstallFlow) -> StepScreen:
 
 
 class UnfinishedScreen(StepScreen):
-    STEP = "Sebelum mulai · Ada sesi uninstall yang belum tuntas"
+    STEP = "Sebelum mulai · Ada sesi yang belum tuntas"
     HELP = (
         "Sesi di bawah terputus, dihentikan, gagal, atau post-check-nya gagal, jadi sistem mungkin setengah jadi. "
         "Wizard akan scan ulang dulu, jadi kondisi sekarang yang dipakai. Untuk lanjut, ketik "
-        f"{CONTINUE_WORD} (huruf besar)."
+        f"{CONTINUE_WORD} (huruf besar). Sesi yang sudah kamu tangani bisa ditandai tuntas di layar Journal (j)."
     )
 
     def __init__(self, flow: UninstallFlow, sessions) -> None:
@@ -399,7 +399,7 @@ class BackupScreen(StepScreen):
         existing.clear_options()
         backups = self.flow.existing_backups()
         for backup in backups:
-            existing.add_option(Option(backup.describe(), id=backup.backup_id, disabled=not backup.usb_copy))
+            existing.add_option(Option(backup.describe(), id=backup.backup_id, disabled=not backup.usable))
         if not backups:
             existing.add_option(Option("Belum ada backup", disabled=True))
 

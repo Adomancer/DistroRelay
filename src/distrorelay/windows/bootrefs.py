@@ -30,6 +30,9 @@ VERDICT_UNSURE = "tidak pasti"
 VERDICT_PROTECTED = "dilindungi"
 VERDICT_NOT_TARGET = "bukan target"
 
+# Folder alat pabrikan (diagnostik/pemulihan BIOS) di ESP: tidak pernah dianggap bootloader Linux.
+VENDOR_FOLDERS = frozenset({"hp", "dell", "lenovo", "asus", "acer", "msi", "toshiba"})
+
 DISTRO_NAMES = {
     "fedora": "Fedora",
     "ubuntu": "Ubuntu",
@@ -133,6 +136,16 @@ class FallbackLoader:
     same_as_windows: bool
     size: int
     identical_to: list[str] = field(default_factory=list)  # file lain di ESP dengan SHA256 sama
+    kind: str = "unknown"  # "windows" | "loader" (GRUB/shim/systemd-boot/rEFInd) | "unknown"
+    loader_dir: str | None = None  # folder ESP tempat GRUB fallback mencari modul/config (prefix tertanam)
+    loader_partnum: int | None = None  # GRUB fallback memuat dari slot GPT lain di disk ini (bukan ESP)
+    loader_other_disk: bool = False  # GRUB fallback memuat dari disk lain ((hdN,...) dengan N > 0)
+    loader_partition: str | None = None  # GUID partisi di slot loader_partnum (diisi analyze; None = slot kosong)
+    loader_target_known: bool = False  # slot itu bisa dipastikan dari tabel GPT
+    loader_unmapped: bool = False  # prefix memakai perangkat yang tidak bisa dipetakan (($root), lvm/, md/, ...)
+    loader_refs: list[FsRef] = field(default_factory=list)  # rujukan dari config tertanam (search ... root)
+    loader_refs_gone: bool = False  # semua rujukan itu sudah tidak ada (diisi analyze)
+    loader_ref_partitions: list[str] = field(default_factory=list)  # GUID partisi yang dirujuk (diisi analyze)
 
 
 @dataclass
@@ -287,15 +300,20 @@ def read_pe_sections(path: Path, names: Sequence[str] = (".osrel", ".cmdline")) 
     return sections
 
 
+# Penanda khas dulu, penanda umum belakangan. Shim memuat sertifikat "Microsoft Corporation UEFI CA", jadi penanda
+# Microsoft yang dipakai adalah nama PDB bootmgr (ada di bootmgfw.efi asli, tidak ada di shim/GRUB).
 _FALLBACK_SIGNATURES = (
     (b"systemd-boot", "systemd-boot"),
     (b"rEFInd", "rEFInd"),
     (b"UEFI SHIM", "shim"),
-    (b"shim", "shim"),
     (b"GNU GRUB", "GRUB"),
+    (b"bootmgfw.pdb", "Microsoft (berbeda dari bootmgfw.efi)"),
+    (b"bootmgr.pdb", "Microsoft (berbeda dari bootmgfw.efi)"),
+    (b"shim", "shim"),
     (b"grub", "GRUB"),
     (b"Microsoft Corporation", "Microsoft (berbeda dari bootmgfw.efi)"),
 )
+_LOADER_OWNERS = {"systemd-boot", "rEFInd", "shim", "GRUB"}
 
 
 def fallback_owner(data: bytes) -> str:
@@ -303,6 +321,12 @@ def fallback_owner(data: bytes) -> str:
         if signature in data:
             return owner
     return "tidak dikenal"
+
+
+def fallback_kind(owner: str) -> str:
+    if owner.startswith("Microsoft"):
+        return "windows"
+    return "loader" if owner in _LOADER_OWNERS else "unknown"
 
 
 _GRUB_OBJ_CONFIG = 2
@@ -346,9 +370,30 @@ def grub_embedded(data: bytes) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _grub_device(prefix: str) -> str:
+    """Bagian perangkat prefix GRUB tanpa kurung: '($root)/boot/grub' -> '$root'; tanpa perangkat -> ''."""
+    match = _PREFIX_DEVICE.match(prefix.strip())
+    return match["device"].strip() if match else ""
+
+
+# Perangkat prefix yang berarti "partisi di disk ini": '', ',gptN', 'hd0,gptN' (nomor slot dicek terpisah).
+_ESP_DEVICE = re.compile(r"^(hd0)?,gpt\d+$")
+
+
+def _grub_disk_index(prefix: str) -> int | None:
+    """N dari '(hdN,gptM)/...', None kalau prefix tidak menyebut disk."""
+    match = _PREFIX_DEVICE.match(prefix.strip())
+    disk = re.search(r"hd(\d+)", match["device"]) if match else None
+    return int(disk.group(1)) if disk else None
+
+
 def _prefix_refs(prefix: str, source: str, esp_number: int | None) -> list[FsRef]:
     """Prefix yang menunjuk partisi selain ESP jadi rujukan nomor partisi (dicek di tahap analisis)."""
     _, number = split_grub_prefix(prefix)
+    disk = _grub_disk_index(prefix)
+    if disk:
+        value = f"hd{disk},gpt{number}" if number is not None else f"hd{disk}"
+        return [FsRef("partnum-other-disk", value, f"prefix GRUB '{prefix}' di {source}")]
     if number is not None and number != esp_number:
         return [FsRef("partnum", str(number), f"prefix GRUB '{prefix}' di {source}")]
     return []
@@ -370,8 +415,10 @@ def _read(root: Path, rel: str, limit: int = _TEXT_LIMIT) -> bytes | None:
         return None
 
 
-def collect_esp_refs(root: Path, esp: EspInventory) -> EspRefs:
+def collect_esp_refs(root: Path, esp: EspInventory, esp_slot: int | None = None) -> EspRefs:
+    """`esp_slot` = nomor slot GPT ESP (dari tabel partisi). GRUB '(,gptN)' memakai nomor slot, bukan nomor Windows."""
     refs = EspRefs()
+    esp_number = esp_slot if esp_slot is not None else esp.partition_number
 
     for directory in esp.dirs:
         parts = directory.split("\\")
@@ -404,8 +451,8 @@ def collect_esp_refs(root: Path, esp: EspInventory) -> EspRefs:
                 continue
             grub_prefixes.append(f"{f.path}: {prefix}")
             target, partition_number = split_grub_prefix(prefix)
-            if partition_number is not None and partition_number != esp.partition_number:
-                folder_refs.extend(_prefix_refs(prefix, f.path, esp.partition_number))
+            if _grub_disk_index(prefix) or (partition_number is not None and partition_number != esp_number):
+                folder_refs.extend(_prefix_refs(prefix, f.path, esp_number))
                 continue
             actual = esp.find_dir(target) if target else None
             if actual is None:
@@ -450,7 +497,7 @@ def collect_esp_refs(root: Path, esp: EspInventory) -> EspRefs:
                 prefix, embedded = grub_embedded(_read(root, f.path, limit=16 * 1024 * 1024) or b"")
                 if prefix:
                     core_prefixes.append(f"{f.path}: {prefix}")
-                    grub_refs.extend(_prefix_refs(prefix, f.path, esp.partition_number))
+                    grub_refs.extend(_prefix_refs(prefix, f.path, esp_number))
                 if embedded:
                     grub_refs.extend(refs_from_grub_cfg(embedded, f"{f.path} (config tertanam)"))
         refs.grub_dirs.append(
@@ -491,13 +538,39 @@ def collect_esp_refs(root: Path, esp: EspInventory) -> EspRefs:
             for f in esp.files
             if f.sha256 == fallback.sha256 and not f.path.lower().startswith("efi\\boot\\")
         ]
+        loader_dir, loader_partnum, loader_other_disk = None, None, False
+        loader_refs: list[FsRef] = []
+        loader_unmapped = False
         if same:
-            owner = "Microsoft (sama persis dengan bootmgfw.efi)"
+            owner, kind = "Microsoft (sama persis dengan bootmgfw.efi)", "windows"
         else:
-            owner = fallback_owner(_read(root, fallback.path, limit=8 * 1024 * 1024) or b"")
+            data = _read(root, fallback.path, limit=8 * 1024 * 1024) or b""
+            owner = fallback_owner(data)
+            kind = fallback_kind(owner)
+            # GRUB di fallback (grub-install --removable), atau GRUB yang dimuat shim dari EFI\Boot: dari mana ia
+            # memuat modul/config menentukan apakah fallback ini masih dipakai Linux yang hidup.
+            grub = data if owner == "GRUB" else (_read(root, "EFI\\Boot\\grubx64.efi", limit=16 * 1024 * 1024) or b""
+                                                 if owner == "shim" else b"")
+            prefix, config = grub_embedded(grub) if grub else (None, None)
+            loader_refs = refs_from_grub_cfg(config, f"{fallback.path} (config tertanam)") if config else []
+            if prefix:
+                path, partnum = split_grub_prefix(prefix)
+                device = _grub_device(prefix)
+                if _grub_disk_index(prefix):
+                    loader_other_disk = True
+                elif partnum is not None and partnum != esp_number:
+                    loader_partnum = partnum
+                elif device and not _ESP_DEVICE.match(device):
+                    # ($root), (lvm/...), (md/...), (cryptouuid/...): /boot di LVM/LUKS/RAID atau disk lain. Lokasinya
+                    # ditentukan config tertanam (search ... root), bukan ESP ini.
+                    loader_unmapped = True
+                elif path:
+                    loader_dir = path
             if identical:
                 owner += f" (identik dengan {identical[0]})"
-        refs.fallback = FallbackLoader(fallback.path, owner, same, fallback.size, identical)
+        refs.fallback = FallbackLoader(fallback.path, owner, same, fallback.size, identical, kind, loader_dir,
+                                       loader_partnum, loader_other_disk, loader_unmapped=loader_unmapped,
+                                       loader_refs=loader_refs)
     return refs
 
 
@@ -541,12 +614,16 @@ class _Group:
     refs: list[FsRef] = field(default_factory=list)
     loaders: set[str] = field(default_factory=set)
     entries: list[tuple[BootEntry, str]] = field(default_factory=list)  # (entri, status file)
+    elsewhere: str | None = None  # bootloader-nya di partisi/disk lain (tidak dianalisis)
     has_folder: bool = False
     notes: list[str] = field(default_factory=list)
 
 
 # Peran yang isinya bisa dibuat ulang (tidak menyimpan data pengguna): cukup backup metadata GPT sebelum dihapus.
 DISPOSABLE_ROLES = frozenset({"boot", "swap"})
+# Titik mount yang jelas bukan root. Selain ini (dan /home, /boot) partisinya dianggap "mungkin-root". /media dan
+# /run/media sengaja tidak termasuk: root distro yang dibuka dari live USB lewat automount terakhir tercatat di sana.
+DATA_MOUNTS = ("/data", "/srv", "/opt", "/var", "/storage", "/backup", "/games")
 
 
 def partition_role(part: Partition, fsinfo: Mapping[str, FsInfo]) -> str:
@@ -569,14 +646,18 @@ def partition_role(part: Partition, fsinfo: Mapping[str, FsInfo]) -> str:
         return "boot"
     if mounted and mounted.startswith("/home"):
         return "home"
-    if mounted:
+    if mounted and any(mounted == p or mounted.startswith(p + "/") for p in DATA_MOUNTS):
         return "data"
+    # Path lain (/mnt saat arch-chroot dari live USB, /sysroot atau /new_root dari initramfs, ...) bisa root.
     return "mungkin-root"
 
 
 class _Context:
-    def __init__(self, inventory, fsinfo, fs_probe_complete, esp):
+    def __init__(self, inventory, fsinfo, fs_probe_complete, esp, gpt_slots=None):
         self.inventory: DiskInventory = inventory or DiskInventory()
+        # Tanpa daftar partisi (Get-Partition gagal / bukan admin), "tidak ada partisi X" tidak bisa disimpulkan.
+        self.inventory_ok = bool(self.inventory.partitions)
+        self.gpt_slots: Mapping[int, Mapping[int, str]] = gpt_slots or {}
         self.fsinfo: Mapping[str, FsInfo] = fsinfo
         self.fs_probe_complete = fs_probe_complete
         self.esp: EspInventory | None = esp
@@ -608,39 +689,47 @@ class _Context:
         """
         if ref.kind == "partuuid":
             part = self.inventory.by_guid(ref.value)
-            return part, "ada" if part else "tidak ada"
+            return part, "ada" if part else ("tidak ada" if self.inventory_ok else "tidak diketahui")
+        if ref.kind == "partnum-other-disk":
+            return None, "tidak diketahui"
         if ref.kind == "partnum":
-            part = self.partition_by_number(int(ref.value))
-            if part is not None and part.category in (gpt_types.LINUX, "unknown"):
+            part, known = self.partition_by_slot(int(ref.value))
+            if not known:
+                return None, "tidak diketahui"
+            if part is not None and part.category in (gpt_types.LINUX, "unknown", "esp"):
                 return part, "ada"
             return None, "tidak ada"
         part = self.by_fs_uuid.get(ref.value)
         if part:
             return part, "ada"
-        return None, "tidak ada" if self.uuid_index_complete else "tidak diketahui"
+        return None, "tidak ada" if self.uuid_index_complete and self.inventory_ok else "tidak diketahui"
 
-    def partition_by_number(self, number: int) -> Partition | None:
-        """Partisi bernomor `number` di disk tempat ESP berada (GRUB '(,gptN)' = disk yang sama)."""
+    def partition_by_slot(self, number: int) -> tuple[Partition | None, bool]:
+        """(partisi di slot GPT `number` pada disk ESP, apakah slot itu bisa dipastikan).
+
+        GRUB '(,gptN)' = slot ke-N di tabel GPT disk yang sama, dibaca langsung dari disk (bukan nomor partisi
+        Windows, yang melewati slot kosong). Tanpa tabel GPT, hasilnya tidak bisa dipastikan.
+        """
         esp_part = self.inventory.by_guid(self.esp.partition_guid) if self.esp else None
-        if esp_part is None:
-            return None
-        return next(
-            (p for p in self.inventory.partitions if p.disk_number == esp_part.disk_number and p.number == number),
-            None,
-        )
+        slots = self.gpt_slots.get(esp_part.disk_number) if esp_part else None
+        if slots is None:
+            return None, False
+        guid = slots.get(number)
+        return (self.inventory.by_guid(guid) if guid else None), True
 
     def missing_text(self, ref: FsRef) -> str:
         if ref.kind == "partnum":
             source = ref.source[:1].upper() + ref.source[1:]
-            part = self.partition_by_number(int(ref.value))
+            part, _ = self.partition_by_slot(int(ref.value))
             if part is None:
-                return f"{source} menunjuk partisi nomor {ref.value} di disk ini, yang sekarang tidak ada"
+                return f"{source} menunjuk slot GPT {ref.value} di disk ini, yang sekarang kosong"
             filesystem = f" ({part.filesystem})" if part.filesystem else ""
             return (
-                f"{source} menunjuk partisi nomor {ref.value} di disk ini, yang sekarang adalah "
-                f"{part.type_name}{filesystem}, bukan partisi Linux (dengan asumsi penomoran GRUB sama dengan Windows)"
+                f"{source} menunjuk slot GPT {ref.value} di disk ini (dibaca dari tabel partisi), yang sekarang adalah "
+                f"{part.id} {part.type_name}{filesystem}, bukan partisi Linux"
             )
-        return f"Merujuk {ref.kind} {ref.value} (dari {ref.source}) yang sudah tidak ada di disk mana pun"
+        return (f"Merujuk {ref.kind} {ref.value} (dari {ref.source}) yang tidak ada di disk yang terpasang "
+                "(kalau distro ini di disk eksternal yang sedang dicabut, colok lalu scan ulang)")
 
     def role(self, part: Partition) -> str:
         return partition_role(part, self.fsinfo)
@@ -671,8 +760,10 @@ def _boot_entry_component(entry: BootEntry, ctx: _Context) -> tuple[Component, s
     if entry.path:
         evidence.append(f"Menjalankan: {entry.path}")
 
-    esp_guid = ctx.esp.partition_guid if ctx.esp else None
-    on_esp = entry.partition_guid is None or entry.partition_guid == esp_guid
+    inventory_esp = ctx.inventory.esp()
+    esp_guid = ctx.esp.partition_guid if ctx.esp else (inventory_esp.guid if inventory_esp else None)
+    # Tanpa GUID partisi (entri hanya dari bcdedit, node MBR, atau tanpa node HD) lokasinya tidak bisa dipastikan.
+    on_esp = entry.partition_guid is not None and entry.partition_guid == esp_guid
     if entry.partition_guid:
         target = ctx.inventory.by_guid(entry.partition_guid)
         if target is None:
@@ -700,8 +791,8 @@ def _boot_entry_component(entry: BootEntry, ctx: _Context) -> tuple[Component, s
         else:
             status = "tidak ada"
             evidence.append("File .efi-nya sudah TIDAK ADA di ESP (entri yatim)")
-    elif entry.partition_guid and ctx.inventory.by_guid(entry.partition_guid) is None:
-        status = "tidak ada"
+    elif entry.partition_guid and ctx.inventory_ok and ctx.inventory.by_guid(entry.partition_guid) is None:
+        status = "partisi tidak ada"
 
     label = f"Entri boot '{entry.description}' ({entry.label})"
     return Component("boot-entry", entry.key, label, evidence=evidence), status
@@ -724,6 +815,7 @@ def _verdict(
     unknown = [ref for ref, part, status in resolved if status == "tidak diketahui"]
     roles = {pid: ctx.role(part) for pid, part in found.items()}
     orphans = [e for e, status in group.entries if status == "tidak ada"]
+    lost_targets = [e for e, status in group.entries if status == "partisi tidak ada"]
 
     for ref in missing:
         reasons.append(ctx.missing_text(ref))
@@ -731,6 +823,8 @@ def _verdict(
         reasons.append(f"Merujuk partisi {pid} (peran: {role})")
     for entry in orphans:
         reasons.append(f"Entri '{entry.description}' menjalankan file yang sudah tidak ada")
+    for entry in lost_targets:
+        reasons.append(f"Entri '{entry.description}' menunjuk partisi yang tidak ada di disk yang terpasang")
 
     if any(role == "root" for role in roles.values()):
         root = next(pid for pid, role in roles.items() if role == "root")
@@ -778,6 +872,13 @@ def _verdict(
         reasons.append("Semua yang dirujuk (filesystem/partisi) sudah tidak ada")
     elif orphans and not group.has_folder:
         verdict = VERDICT_LEFTOVER
+    elif lost_targets and not group.has_folder:
+        verdict = VERDICT_UNSURE
+        reasons.append("Partisi tujuannya mungkin ada di disk eksternal/USB yang sedang dicabut; colok lalu scan ulang")
+    elif group.elsewhere:
+        verdict = VERDICT_UNSURE
+        reasons.append(f"Bootloader-nya ada di {group.elsewhere}, yang isinya tidak dianalisis DistroRelay; tidak bisa "
+                       "dipastikan sisa atau masih dipakai")
     else:
         # Tanpa rujukan: lihat apakah masih ada partisi yang bisa jadi root instalasi ini.
         free = [
@@ -789,13 +890,15 @@ def _verdict(
             verdict = VERDICT_UNSURE
             ids = ", ".join(p.id for p in free)
             reasons.append(f"Tidak ada rujukan yang bisa dibaca, dan masih ada partisi ({ids}) yang belum terhubung ke instalasi mana pun")
-        elif ctx.fs_probe_complete:
-            verdict = VERDICT_LEFTOVER
+        elif ctx.fs_probe_complete and ctx.inventory_ok:
+            # Tanpa satu pun rujukan positif (mis. rEFInd, atau config yang tidak dibaca) "sisa" tidak terbukti.
+            verdict = VERDICT_UNSURE
             owned_elsewhere = any(owner != group.key for owner in attached.values())
             detail = " (semua partisi Linux yang ada sudah terhubung ke instalasi lain)" if owned_elsewhere else ""
             reasons.append(
                 f"Tidak ada rujukan yang bisa dibaca, dan tidak ada partisi yang bisa jadi root-nya{detail}. "
-                "Kalau distro ini terpasang di disk eksternal, colok disk itu lalu scan ulang"
+                "Kemungkinan sisa, tapi tidak ada bukti dari isi file; kalau distro ini terpasang di disk eksternal, "
+                "colok disk itu lalu scan ulang"
             )
         else:
             verdict = VERDICT_UNSURE
@@ -837,9 +940,18 @@ def analyze(
     esp: EspInventory | None,
     esp_refs: EspRefs | None,
     extra_notes: Sequence[str] = (),
+    gpt_slots: Mapping[int, Mapping[int, str]] | None = None,
 ) -> Analysis:
-    ctx = _Context(inventory, fsinfo, fs_probe_complete, esp)
+    ctx = _Context(inventory, fsinfo, fs_probe_complete, esp, gpt_slots)
     ctx.fallback = esp_refs.fallback if esp_refs else None
+    if ctx.fallback is not None and ctx.fallback.loader_partnum is not None:
+        target, known = ctx.partition_by_slot(ctx.fallback.loader_partnum)
+        ctx.fallback.loader_partition = target.guid if target else None
+        ctx.fallback.loader_target_known = known
+    if ctx.fallback is not None and ctx.fallback.loader_refs:
+        resolved = [ctx.resolve(ref) for ref in ctx.fallback.loader_refs]
+        ctx.fallback.loader_refs_gone = all(status == "tidak ada" for _, status in resolved)
+        ctx.fallback.loader_ref_partitions = [part.guid for part, _ in resolved if part is not None]
     groups: dict[str, _Group] = {}
 
     def group(key: str, name: str, kind: str) -> _Group:
@@ -1005,10 +1117,17 @@ def analyze(
                 )
             )
 
+    esp_part = ctx.inventory.esp()
+    esp_guid = esp.partition_guid if esp else (esp_part.guid if esp_part else None)
     for entry in boot_entries:
         component, status = _boot_entry_component(entry, ctx)
         path = (entry.path or "").lower().lstrip("\\").split("\\")
-        owner = file_owner.get(norm_path(entry.path).lower()) if entry.path else None
+        # Path "\EFI\ubuntu\..." di NVRAM bisa menunjuk ESP disk lain. Hanya entri yang menunjuk ESP ini (atau entri
+        # bcdedit tanpa data NVRAM, yang tidak bisa dihapus) yang boleh digabung dengan folder ESP bernama sama.
+        here = (entry.partition_guid is not None and entry.partition_guid == esp_guid) or (
+            entry.partition_guid is None and "NVRAM" not in entry.sources
+        )
+        owner = file_owner.get(norm_path(entry.path).lower()) if entry.path and here else None
         if entry.is_windows_boot_manager or path[:2] == ["efi", "microsoft"]:
             target = windows
             component.protected = True
@@ -1020,12 +1139,28 @@ def analyze(
             target = group("firmware", "Entri bawaan firmware / perangkat", "firmware")
             component.evidence.append("Menjalankan file fallback EFI\\Boot (entri generik buatan firmware)")
         elif len(path) >= 3 and path[0] == "efi" and path[1] != "linux":
-            key = folder_groups.get(path[1])
-            if key is None:
-                name = DISTRO_NAMES.get(_UUID.sub("", path[1]).strip("-_ "), path[1])
-                key = group(f"efi:{path[1]}", name, "linux").key
-                folder_groups[path[1]] = key
-            target = groups[key]
+            base = _UUID.sub("", path[1]).strip("-_ ")
+            name = DISTRO_NAMES.get(base, path[1])
+            # Hanya nama distro yang dikenal yang dianggap Linux; nama lain tidak jadi "linux" hanya karena path-nya.
+            kind = "linux" if base in DISTRO_NAMES else "unattached"
+            if base in VENDOR_FOLDERS:
+                target = group("other-esp", "Folder lain di ESP (bukan bootloader Linux yang dikenal)", "other")
+            elif not here:
+                where_part = ctx.inventory.by_guid(entry.partition_guid) if entry.partition_guid else None
+                where = where_part.id if where_part else (entry.partition_guid or "lokasi tidak diketahui")
+                target = group(f"efi:{path[1]}@{where}", f"{name} (di {where})", kind)
+                if where_part is not None:
+                    target.elsewhere = f"partisi {where}"
+                note = (f"Entri '{entry.description}' menjalankan file di {where}, bukan di ESP ini; folder "
+                        f"EFI\\{path[1]} di ESP ini (kalau ada) bukan miliknya")
+                if note not in target.notes:
+                    target.notes.append(note)
+            else:
+                key = folder_groups.get(path[1])
+                if key is None:
+                    key = group(f"efi:{path[1]}", name, kind).key
+                    folder_groups[path[1]] = key
+                target = groups[key]
         else:
             target = group("unattached", "Tidak terkait instalasi mana pun", "unattached")
         target.components.insert(sum(1 for c in target.components if c.kind == "boot-entry"), component)

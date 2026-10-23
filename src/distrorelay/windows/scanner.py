@@ -19,7 +19,7 @@ from typing import Callable
 
 from .. import __version__
 from . import bitlocker as bitlocker_mod
-from . import bootentries, bootrefs, disks, esp as esp_mod, fsprobe, nvram
+from . import bootentries, bootrefs, disks, esp as esp_mod, fsprobe, gpt_types, nvram
 from .bootentries import BootEntry, FirmwareConfig
 from .bootrefs import Analysis, EspRefs
 from .disks import DiskInventory, Partition
@@ -55,6 +55,7 @@ class ScanReport:
     nvram: NvramSnapshot | None = None
     fsinfo: dict[str, FsInfo] = field(default_factory=dict)
     fs_probe_complete: bool = False
+    gpt_slots: dict[int, dict[int, str]] = field(default_factory=dict)  # disk -> slot GPT -> GUID partisi
     bitlocker: list[bitlocker_mod.BitLockerVolume] | None = None
     boot_entries: list[BootEntry] = field(default_factory=list)
     analysis: Analysis | None = None
@@ -71,6 +72,7 @@ class ScanDeps:
     read_nvram: Callable[[], NvramSnapshot]
     read_partition_head: Callable[[Partition, int], bytes]
     mount_esp: Callable[[Runner, Partition], AbstractContextManager[MountedEsp]]
+    read_gpt_slots: Callable[[int, int], dict[int, str]] | None = None  # None = tidak dibaca (rujukan gptN = tidak diketahui)
 
 
 def default_deps() -> ScanDeps:
@@ -82,6 +84,7 @@ def default_deps() -> ScanDeps:
             part.disk_number, part.offset, part.size, sector
         ),
         mount_esp=esp_mod.mounted_esp,
+        read_gpt_slots=fsprobe.read_gpt_slots,
     )
 
 
@@ -128,6 +131,14 @@ def run_scan(deps: ScanDeps | None = None, progress: Callable[[str], None] | Non
             if info is not None:
                 report.fsinfo[part.id] = info
         report.fs_probe_complete = complete
+        if deps.read_gpt_slots is not None:
+            for disk in report.inventory.disks:
+                if (disk.partition_style or "").upper() != "GPT":
+                    continue
+                try:
+                    report.gpt_slots[disk.number] = deps.read_gpt_slots(disk.number, disk.sector_size)
+                except (OSError, ValueError) as exc:
+                    report.issues.append(Issue("fsprobe", f"Tabel GPT disk {disk.number} tidak terbaca: {exc}"))
 
     def load_firmware() -> None:
         say("Membaca entri boot (bcdedit)…")
@@ -149,7 +160,9 @@ def run_scan(deps: ScanDeps | None = None, progress: Callable[[str], None] | Non
         with deps.mount_esp(deps.runner, esp_part) as mounted:
             report.esp = esp_mod.scan_esp(mounted.root, esp_part, mounted)
             say("Membaca konfigurasi bootloader di ESP…")
-            report.esp_refs = bootrefs.collect_esp_refs(mounted.root, report.esp)
+            slots = report.gpt_slots.get(esp_part.disk_number) or {}
+            esp_slot = next((n for n, guid in slots.items() if gpt_types.normalize_guid(guid) == esp_part.guid), None)
+            report.esp_refs = bootrefs.collect_esp_refs(mounted.root, report.esp, esp_slot)
 
     def load_bitlocker() -> None:
         say("Membaca status BitLocker…")
@@ -175,6 +188,7 @@ def run_scan(deps: ScanDeps | None = None, progress: Callable[[str], None] | Non
         report.esp,
         report.esp_refs,
         extra_notes=merge_notes,
+        gpt_slots=report.gpt_slots,
     )
     say("Scan selesai.")
     return report

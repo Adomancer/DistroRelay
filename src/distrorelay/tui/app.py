@@ -45,6 +45,7 @@ class DistroRelayApp(App):
     #nav { height: auto; padding: 0 1; }
     #nav Button { margin-right: 2; }
     #log { height: auto; max-height: 16; }
+    #attention { height: auto; max-height: 8; }
     """
 
     def __init__(
@@ -58,7 +59,7 @@ class DistroRelayApp(App):
         self.log_path = log_path
         self._scan = scan
         self._deps = deps
-        self.stop_signal: StopSignal | None = None  # diisi layar eksekusi selama uninstall berjalan
+        self.stop_signal: StopSignal | None = None  # diisi selama uninstall/pemulihan berjalan
         self.quit_blocker: str | None = None  # alasan aplikasi tidak boleh ditutup sekarang
 
     def get_default_screen(self) -> Screen:
@@ -105,13 +106,13 @@ class DistroRelayApp(App):
 
     async def action_quit(self) -> None:
         if self.stop_signal is not None:
-            # Uninstall sedang berjalan: keluar = berhenti dengan rapi dulu, bukan memotong langkah.
+            # Uninstall/pemulihan sedang berjalan: keluar = berhenti dengan rapi dulu, bukan memotong langkah.
             stopper = getattr(self.screen, "action_request_stop", None)
             if stopper is not None:
                 stopper("Ctrl+Q")
             else:
                 self.stop_signal.request("Dihentikan pengguna (Ctrl+Q)")
-            self.notify("Uninstall berhenti setelah langkah ini selesai. Tekan Ctrl+Q lagi setelah itu untuk keluar.")
+            self.notify("Proses berhenti setelah langkah ini selesai. Tekan Ctrl+Q lagi setelah itu untuk keluar.")
             return
         if self.quit_blocker:
             self.notify(self.quit_blocker, severity="warning")

@@ -17,12 +17,15 @@ from typing import Mapping, Sequence
 from ..format import human_size
 from . import gpt_types
 from .bootentries import BootEntry
-from .bootrefs import DISPOSABLE_ROLES, VERDICT_IN_USE, VERDICT_UNSURE, Analysis, Component, Installation, partition_role
+from .bootrefs import DISPOSABLE_ROLES, VENDOR_FOLDERS, VERDICT_IN_USE, VERDICT_UNSURE, Analysis, Component, Installation, partition_role
 from .disks import DiskInventory, Partition
 from .fsprobe import FsInfo
 
 SELECTABLE_KINDS = ("linux", "unattached")
-_NEVER_TOUCH = ("efi\\microsoft", "efi\\boot")
+# Windows, fallback firmware, dan folder alat pabrikan (diagnostik/pemulihan BIOS) tidak pernah dihapus, apa pun
+# hasil analisisnya.
+VENDOR_DIRS = tuple("efi\\" + name for name in sorted(VENDOR_FOLDERS))
+_NEVER_TOUCH = ("efi\\microsoft", "efi\\boot", *VENDOR_DIRS)
 
 
 @dataclass
@@ -164,7 +167,49 @@ def build_plan(
             for p in fallback.identical_to
             if p.lower() in files or any(p.lower().startswith(f + "\\") for f in folders)
         ]
+        def deleted(path: str | None) -> bool:
+            low = (path or "").lower()
+            return bool(low) and (low in files or any(low == f or low.startswith(f + "\\") for f in folders))
+
+        chosen_refs = {c.ref.lower() for _, c in chosen}
+        deleted_partitions = {
+            p.guid for p in (inventory.partitions if inventory else []) if p.id.lower() in chosen_refs
+        }
+        # GRUB fallback yang memuat dari partisi lain: masih dipakai Linux di sana, kecuali partisi itu ikut dihapus
+        # atau sudah tidak ada (slot kosong).
+        loads_elsewhere = fallback.loader_other_disk or fallback.loader_unmapped or fallback.loader_partnum is not None
+        target_gone = fallback.loader_partnum is not None and fallback.loader_target_known and (
+            fallback.loader_partition is None or fallback.loader_partition in deleted_partitions
+        )
+        # ($root)/LVM/LUKS: config tertanam menunjuk filesystem /boot-nya. Paksa ganti hanya kalau semua yang dirujuk
+        # sudah tidak ada, atau partisi yang dirujuk ikut dihapus di rencana ini.
+        target_gone = target_gone or fallback.loader_unmapped and bool(fallback.loader_refs) and (
+            fallback.loader_refs_gone
+            or bool(fallback.loader_ref_partitions)
+            and all(guid in deleted_partitions for guid in fallback.loader_ref_partitions)
+        )
+        remaining_linux = [
+            c.ref
+            for inst in analysis.installations
+            if inst.kind == "linux"
+            for c in inst.components
+            if c.kind == "esp-folder" and c.ref.lower() not in chosen_refs
+        ]
+        reason = None
         if twins:
+            reason = f"Wajib, karena {twins[0]} akan dihapus; tanpa langkah ini fallback menunjuk bootloader yang sudah hilang"
+        elif fallback.kind == "loader" and deleted(fallback.loader_dir):
+            reason = (f"Wajib, karena fallback ini ({fallback.owner}) memuat modul/config dari {fallback.loader_dir} "
+                      "yang akan dihapus; tanpa langkah ini boot lewat fallback berakhir di grub rescue")
+        elif fallback.kind == "loader" and target_gone and chosen:
+            source = (f"slot GPT {fallback.loader_partnum}" if fallback.loader_partnum is not None
+                      else "filesystem yang dirujuk config GRUB-nya")
+            reason = (f"Wajib, karena fallback ini ({fallback.owner}) memuat dari {source} yang dihapus/tidak ada; "
+                      "tanpa langkah ini boot lewat fallback berakhir di grub rescue")
+        elif fallback.kind == "loader" and folders and not remaining_linux and not loads_elsewhere:
+            reason = ("Wajib, karena tidak ada folder Linux lain yang tersisa di ESP; bootloader Linux di fallback tidak "
+                      "punya pemilik lagi dan boot lewat fallback (mis. setelah NVRAM ter-reset) tidak akan masuk Windows")
+        if reason:
             plan.actions.append(
                 PlannedAction(
                     "restore-fallback",
@@ -175,7 +220,7 @@ def build_plan(
                     ],
                     [
                         f"Isi sekarang: {fallback.owner}",
-                        f"Wajib, karena {twins[0]} akan dihapus; tanpa langkah ini fallback menunjuk bootloader yang sudah hilang",
+                        reason,
                         "Dijalankan sebelum entri & folder dihapus",
                     ],
                     fallback.path,
@@ -183,9 +228,16 @@ def build_plan(
                 )
             )
         else:
-            plan.warnings.append(
-                f"File fallback {fallback.path} bukan milik Windows ({fallback.owner}), tapi tidak terkait pilihan ini"
-            )
+            if fallback.kind == "windows":
+                why = "isinya milik Microsoft, hanya beda versi dengan bootmgfw.efi"
+            elif loads_elsewhere:
+                why = "bootloader-nya memuat dari partisi/disk lain yang mungkin masih dipakai"
+            elif remaining_linux:
+                why = f"masih ada folder Linux lain yang mungkin memakainya ({', '.join(remaining_linux[:3])})"
+            else:
+                why = "tidak terkait pilihan ini"
+            plan.warnings.append(f"File fallback {fallback.path} bukan salinan bootmgfw.efi ({fallback.owner}); "
+                                 f"dibiarkan karena {why}")
 
     entries = {e.key.lower(): e for e in boot_entries}
     for _, comp in sorted(

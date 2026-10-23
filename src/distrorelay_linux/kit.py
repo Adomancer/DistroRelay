@@ -1,5 +1,8 @@
 """Folder kit: profil + kode, dengan manifest SHA256 yang dicek ulang sebelum dipakai.
 
+Cek ini menangkap file yang rusak/terpotong (USB bermasalah, salinan setengah jadi), bukan pengubahan yang disengaja:
+kode yang mengecek berasal dari kit yang sama dan sudah jalan saat cek dilakukan.
+
 Tata letak (dibuat oleh `distrorelay kit export` di Windows):
     <drive>/DistroRelay/kit/            kode + profile.json + packages.json + manifest.json (diganti tiap export)
     <drive>/DistroRelay/linux-backups/  backup dari distro lama (M5), tidak pernah disentuh export
@@ -61,6 +64,13 @@ def read_manifest(root: Path) -> dict:
     return manifest
 
 
+# File yang bisa dijalankan/dibaca kit: yang tidak tercatat di manifest ditolak (selain __pycache__).
+_CODE_SUFFIXES = (".py", ".sh", ".json", ".txt", ".toml")
+# File inti yang wajib tercatat di manifest; kit tanpa salah satunya tidak dipakai.
+REQUIRED_FILES = ("profile.json", "packages.json", "bootstrap.sh", "distrorelay_linux/__init__.py",
+                  "distrorelay_linux/cli.py")
+
+
 def verify(root: Path) -> list[str]:
     """Masalah integritas kit (kosong = semua file sama dengan manifest)."""
     root = Path(root)
@@ -69,6 +79,17 @@ def verify(root: Path) -> list[str]:
     except KitError as exc:
         return exc.problems
     problems = []
+    listed = {str(entry.get("path", "")) for entry in manifest.get("files", [])}
+    for required in REQUIRED_FILES:
+        if required not in listed:
+            problems.append(f"{required}: tidak tercatat di manifest")
+    root_resolved = root.resolve()
+    for path in sorted(root_resolved.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts or path.suffix not in _CODE_SUFFIXES:
+            continue
+        rel = path.relative_to(root_resolved).as_posix()
+        if rel != MANIFEST and rel not in listed:
+            problems.append(f"{rel}: ada di folder kit tapi tidak tercatat di manifest")
     for entry in manifest.get("files", []):
         rel = str(entry.get("path", ""))
         target = (root / rel).resolve()

@@ -28,10 +28,12 @@ class Step:
     key: str
     title: str
     commands: list[Command] = field(default_factory=list)
-    action: Callable[[], str] | None = None  # langkah Python (mis. edit pacman.conf, pulihkan dotfiles)
+    # Langkah Python (mis. edit pacman.conf, pulihkan dotfiles): pesan, atau (status, pesan) kalau hasilnya sebagian.
+    action: Callable[[], object] | None = None
     after: tuple[str, ...] = ()  # langkah yang harus berhasil dulu
     each: list[str] = field(default_factory=list)  # paket untuk dicoba satu per satu kalau perintah gagal
     each_command: Callable[[list[str]], Command] | None = None
+    each_prepare: list[Command] = field(default_factory=list)  # sekali, sebelum dicoba satu per satu
     approval: str | None = None  # pertanyaan tambahan sebelum langkah ini (mis. membangun paket dari AUR)
 
 
@@ -118,7 +120,8 @@ def build_plan(
                 f"Pasang {len(native)} paket lewat {backend.name}",
                 backend.refresh(is_root) + [backend.install(native, is_root)],
                 each=native,
-                each_command=lambda packages: backend.install(packages, is_root),
+                each_command=lambda packages: backend.install_one(packages, is_root),
+                each_prepare=backend.prepare_each(is_root),
             )
         )
 
@@ -167,27 +170,33 @@ def build_plan(
                 )
             )
 
-    # 6. Dotfiles + file sensitif
+    # 6. Dotfiles + file sensitif. Dijalankan sebagai root (sudo sh bootstrap.sh setup), home-nya /root dan file
+    # yang ditulis milik root, jadi langkah ini dilewati; kit sendiri meminta sudo hanya untuk perintah paket.
     archive = Path(backup_dir) / "dotfiles.tar.gz" if backup_dir is not None else None
+    as_root = is_root and (archive is not None or sensitive_file is not None)
+    if as_root:
+        plan.notes.append("Dotfiles dan file sensitif tidak dipulihkan karena setup dijalankan sebagai root; "
+                          "jalankan `sh bootstrap.sh setup` tanpa sudo sebagai pengguna biasa")
+        archive, sensitive_file = None, None
     if archive is not None and archive.is_file():
         plan.steps.append(
             Step(
                 "dotfiles",
                 f"Pulihkan dotfiles dari {archive}",
-                action=lambda: dotfiles.restore(archive, home, stamp).summary(),
+                action=lambda: restore_outcome(dotfiles.restore(archive, home, stamp)),
             )
         )
-    elif profile.dotfiles:
+    elif profile.dotfiles and not as_root:
         plan.notes.append("Dotfiles belum dipulihkan: belum ada backup (dibuat dengan `backup` di distro lama)")
     if sensitive_file is not None and decrypt is not None:
         plan.steps.append(
             Step(
                 "sensitive",
                 f"Pulihkan file sensitif dari {sensitive_file} (gpg, minta passphrase)",
-                action=lambda: dotfiles.restore(decrypt(sensitive_file), home, stamp, private=True).summary(),
+                action=lambda: restore_outcome(dotfiles.restore(decrypt(sensitive_file), home, stamp, private=True)),
             )
         )
-    elif profile.sensitive and backup_dir is not None:
+    elif profile.sensitive and backup_dir is not None and not as_root:
         plan.notes.append("File sensitif tidak dipulihkan: tidak ada salinan terenkripsinya di backup ini atau di USB")
     return plan
 
@@ -247,17 +256,39 @@ def execute(
     return list(results.values())
 
 
+def restore_outcome(report) -> tuple[str, str]:
+    """Status langkah pulihkan dotfiles: file yang dilewati disebut (path: alasan), bukan hanya dihitung."""
+    message = report.summary()
+    if report.skipped:
+        shown = "; ".join(f"{path}: {why}" for path, why in report.skipped[:5])
+        more = f" (+{len(report.skipped) - 5} lagi)" if len(report.skipped) > 5 else ""
+        message += f". Dilewati: {shown}{more}"
+    if not report.skipped:
+        return "ok", message
+    return ("sebagian" if report.restored or report.unchanged else "gagal"), message
+
+
 def _run_step(step: Step, runner) -> StepResult:
     try:
         message = step.action() if step.action is not None else ""
     except Exception as exc:  # langkah Python gagal = langkah ini gagal, sisanya tetap dicoba
         return StepResult(step.key, step.title, "gagal", f"{type(exc).__name__}: {exc}")
+    if isinstance(message, tuple):
+        status, text = message
+        if status != "ok":
+            return StepResult(step.key, step.title, status, text)
+        message = text
     for cmd in step.commands:
         result = runner.run(cmd, capture=False)
         if result.ok:
             continue
         if not step.each or step.each_command is None:
             return StepResult(step.key, step.title, "gagal", f"`{cmd.display()}` keluar dengan kode {result.returncode}")
+        for prepare in step.each_prepare:
+            prepared = runner.run(prepare, capture=False)
+            if not prepared.ok:
+                return StepResult(step.key, step.title, "gagal",
+                                  f"`{prepare.display()}` keluar dengan kode {prepared.returncode}")
         failed = [name for name in step.each if not runner.run(step.each_command([name]), capture=False).ok]
         if len(failed) == len(step.each):
             return StepResult(step.key, step.title, "gagal", f"semua gagal: {', '.join(failed)}")

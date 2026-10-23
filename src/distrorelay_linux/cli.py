@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -147,6 +149,16 @@ def cmd_setup(args) -> int:
         print(f"Memakai backup {backup_dir}")
         search = [path.parent / "linux-backups" for _, path in kit_mod.find_kits(kit_mod.default_search_roots())]
         sensitive_file = backup_mod.sensitive_path(backup_dir, backup_mod.read_manifest(backup_dir), search)
+    # Folder kerja (build paru, pacman.conf baru) hanya dibuat kalau rencana benar-benar dijalankan, dan dihapus di akhir.
+    workdir = str(Path(tempfile.gettempdir()) / "distrorelay-<sementara>") if args.dry_run else provision.new_workdir()
+    try:
+        return _setup(args, kit, distro, runner, is_root, backup_dir, sensitive_file, workdir)
+    finally:
+        if not args.dry_run:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _setup(args, kit, distro, runner, is_root, backup_dir, sensitive_file, workdir: str) -> int:
     plan = provision.build_plan(
         kit.profile,
         kit.packages,
@@ -155,7 +167,7 @@ def cmd_setup(args) -> int:
         has_paru=runner.which("paru"),
         home=Path.home(),
         stamp=datetime.now().strftime("%Y%m%d-%H%M%S"),
-        workdir=provision.new_workdir(),
+        workdir=workdir,
         backup_dir=backup_dir,
         sensitive_file=sensitive_file,
         decrypt=lambda path: backup_mod.decrypt(runner, path),

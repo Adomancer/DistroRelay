@@ -20,9 +20,9 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M2c | Alur tunggal `UninstallFlow`/`RestoreFlow`; wizard uninstall, menu Pulihkan, dan journal di TUI | ✅ fase A + B lolos VM (sisa: cek 2× reboot skenario 9) |
 | M3 | Hapus partisi Linux (pengaman + ketik ID partisi, aturan backup bertingkat), pulihkan partisi, perluas C: kalau bersebelahan | ✅ kode + test simulasi; skenario VM belum |
 | M4 | Profil (TOML) + peta nama paket per distro, export Linux kit ke USB/NTFS, `setup` di distro baru | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
-| M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import`, aturan backup bertingkat (a) | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
+| M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import` | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
 | M6 | ISO manager (cek versi terbaru, unduh yang bisa dilanjutkan, verifikasi GPG + SHA256, salin ke Ventoy), shrink C: | ✅ kode + test (tanda tangan asli distro dicek dengan gpgv); unduh ISO penuh, salin ke Ventoy, dan shrink di VM belum |
-| M7 | Rilis `.exe` (PyInstaller, tanpa Python), `selftest`, workflow GitHub untuk rilis draft | ✅ `.exe` dibuild + `selftest` lolos di laptop ini; workflow GitHub belum pernah dijalankan |
+| M7 | Rilis `.exe` (PyInstaller, tanpa Python), `selftest`, workflow GitHub untuk rilis draft | ✅ `.exe` dibuild + `selftest` lolos di laptop ini; workflow GitHub lolos untuk rilis v0.7.0 (E-7) |
 
 ## Apa yang dilakukan scan
 
@@ -91,7 +91,14 @@ python -m venv .venv
 .venv\Scripts\python.exe -m distrorelay restore --backup <id> --partition disk0-p5 --esp-item EFI\fedora --boot-entry Fedora
 # Lihat sesi eksekusi, termasuk yang terputus di tengah
 .venv\Scripts\python.exe -m distrorelay journal
+# Sesi terputus/gagal yang sudah kamu cek sendiri: tandai tuntas (ketik TUNTAS) supaya tidak lagi meminta LANJUT
+.venv\Scripts\python.exe -m distrorelay journal --tuntaskan 20261022-101500
 ```
+
+Sesi uninstall yang semua item terhapusnya sudah dikembalikan lewat Pulihkan (dan post-check pemulihannya hijau) juga
+otomatis dianggap tuntas. Backup yang gagal salah satu cek saat dibuat (`verification.json`) tidak bisa dipakai untuk
+uninstall. Gerbang hanya membandingkan layout disk Windows dan disk yang partisinya dihapus, jadi flashdisk/HDD lain
+boleh dicolok atau dicabut di antara backup dan uninstall.
 
 Rencana uninstall selalu berurutan supaya laptop tetap bisa boot ke Windows di setiap titik:
 Windows Boot Manager jadi pertama → fallback `EFI\Boot\bootx64.efi` dikembalikan ke milik Windows (tanda tangan Microsoft dicek dulu) → entri boot dihapus → folder ESP dihapus → partisi dihapus (layout disk dicek ulang tepat sebelumnya; hanya script persis
@@ -99,7 +106,8 @@ dari rencana yang boleh memanggil `Remove-Partition`) → (opsional) C: diperlua
 kecuali kamu memilih perluas C:. Prosedur darurat ada di [docs/RECOVERY.md](docs/RECOVERY.md).
 
 Tombol di dashboard: `r` scan ulang, `s` simpan laporan JSON ke `%LOCALAPPDATA%\DistroRelay\reports\`, `u` wizard uninstall,
-`p` Pulihkan, `j` journal, `q` keluar. Dashboard sendiri read-only. Banner kuning muncul kalau ada sesi uninstall yang belum tuntas.
+`p` Pulihkan, `j` journal (di sana sesi yang belum tuntas bisa ditandai tuntas), `q` keluar. Dashboard sendiri read-only.
+Banner kuning muncul kalau ada sesi uninstall yang belum tuntas.
 
 Wizard uninstall (`u`) memakai alur yang sama dengan CLI `uninstall`: sesi belum tuntas (ketik `LANJUT`) → mode VM/asli →
 scan + pilih kandidat (spasi = centang, rencana dry-run tampil di sebelahnya) → preflight → backup baru atau pakai yang ada →
@@ -130,7 +138,7 @@ flashdisk dan/atau partisi Windows. Di distro baru, kit memasang semuanya lewat 
 
 ```sh
 # Di Linux, dari folder kit (mis. /run/media/$USER/USB/DistroRelay/kit atau /mnt/c/DistroRelay/kit di WSL)
-sh bootstrap.sh info             # distro + isi kit; hash semua file dicek dulu
+sh bootstrap.sh info             # distro + isi kit; hash semua file dicek (cek korupsi)
 sh bootstrap.sh setup --dry-run  # rencana + perintah persisnya, tidak menjalankan apa pun
 sh bootstrap.sh setup            # repo -> paket -> Flathub/Flatpak -> AUR (paru, dengan persetujuan) -> laporan
 ```
@@ -141,6 +149,9 @@ sh bootstrap.sh setup            # repo -> paket -> Flathub/Flatpak -> AUR (paru
   [`src/distrorelay/common/data/packages.toml`](src/distrorelay/common/data/packages.toml) dan bisa ditimpa lewat
   `%LOCALAPPDATA%\DistroRelay\packages.toml`.
 - Kit tidak butuh `pip install`: Python stdlib saja, jalan di Python 3.8+ (`bootstrap.sh` memasang python3 kalau belum ada).
+- Cek hash kit menangkap file yang rusak atau terpotong (mis. USB bermasalah). Itu **bukan bukti keaslian**: hash dicek
+  oleh kode kit itu sendiri, jadi kit yang sengaja diubah tidak bisa terdeteksi dari dalam. Pakai kit hanya dari
+  flashdisk/partisi milikmu.
 - `setup` hanya menambah. Kalau pemasangan paket sekaligus gagal, paketnya dicoba satu per satu supaya ketahuan mana
   yang bermasalah. Dotfiles dipulihkan dari backup terbaru (lihat di bawah); file lama di-rename, bukan ditimpa.
 
@@ -170,7 +181,8 @@ sh bootstrap.sh setup --backup latest|none|DIR   # default: backup terbaru yang 
   kit ini di partisi Windows, file sensitif ditaruh di kit lain yang ada di USB, atau tidak dibackup sama sekali.
   Isinya tidak pernah ditulis ke disk tanpa enkripsi, dan dipulihkan dengan permission 700/600.
 - Backup mencatat UUID filesystem `/` dan `/home` (+ LUKS). Saat uninstall di Windows, partisi yang UUID-nya tercatat
-  di backup Linux terverifikasi di drive eksternal tidak perlu pernyataan "DATA SUDAH DIBACKUP" (tetap ada peringatan).
+  di backup Linux terverifikasi diberi catatan "paket + dotfiles sudah dibackup", tapi pernyataan "DATA SUDAH DIBACKUP"
+  **tetap wajib**: backup ini bukan backup dokumen, dan partisi root sering ikut memuat `/home`.
 
 ## ISO manager (M6): siapkan USB Ventoy
 
@@ -214,7 +226,7 @@ sesudah C: dan bisa langsung dipakai installer Linux.
 ## Rilis `.exe` (M7)
 
 ```powershell
-.venv\Scripts\python.exe -m pip install -e ".[dev,build]"
+.venv\Scripts\python.exe -m pip install -c packaging\constraints.txt -e ".[dev,build]"   # versi sama dengan rilis
 .venv\Scripts\python.exe -m PyInstaller packaging\distrorelay.spec --noconfirm   # -> dist\distrorelay.exe
 dist\distrorelay.exe selftest     # data bawaan, Linux kit (diekspor ke folder sementara), keyring ISO, TUI headless
 ```
@@ -237,7 +249,9 @@ packaging/                spec PyInstaller + launcher untuk distrorelay.exe
 src/distrorelay_linux/    Linux kit (stdlib, Python 3.8+): cli, distro, pm, provision, dotfiles, backup, kit, bootstrap.sh
 src/distrorelay/common/   profil + peta paket, dipakai Windows dan Linux kit
 src/distrorelay/
-├─ __main__.py            CLI & elevasi admin
+├─ __main__.py            entry point: logging, elevasi admin, pilih perintah
+├─ cli/                   satu modul per perintah (scan, backup, uninstall/restore/journal, Linux kit, iso, shrink)
+├─ hashing.py             SHA256 file per 1 MiB (dipakai semua modul Windows)
 ├─ selftest.py            cek isi paket/.exe tanpa mengubah sistem
 ├─ render.py              tampilan bersama untuk CLI dan TUI
 ├─ tui/                   dashboard + wizard uninstall, Pulihkan, journal (Textual; hanya lewat workflow)

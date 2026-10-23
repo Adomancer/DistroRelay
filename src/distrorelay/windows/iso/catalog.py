@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import string
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -162,21 +163,37 @@ def check(
     drive: Path | None = None,
     editions: dict[str, str] | None = None,
     downloads_root: Path | None = None,
+    progress: Callable[[list[str]], None] | None = None,
 ) -> list[CatalogRow]:
-    """Satu baris per distro. Distro yang feed-nya gagal dibaca tetap tampil dengan alasannya."""
+    """Satu baris per distro, urut seperti `sources`. Distro yang feed-nya gagal dibaca tetap tampil dengan alasannya.
+
+    Feed tiap distro diambil bersamaan: satu server yang lambat tidak membuat distro lain ikut menunggu.
+    `progress(nama distro yang masih ditunggu)` dipanggil setiap ada yang selesai.
+    """
     on_drive = scan_isos(drive, sources) if drive is not None else []
-    rows = []
-    for distro, source in sources.items():
+
+    def newest(distro: str, source: ModuleType) -> tuple[Release | None, str | None]:
         try:
-            latest, error = source.latest(fetch, (editions or {}).get(distro)), None
+            latest = source.latest(fetch, (editions or {}).get(distro))
             problems = latest.problems()
-            if problems:
-                latest, error = None, "; ".join(problems)
+            return (None, "; ".join(problems)) if problems else (latest, None)
         except IsoError as exc:
-            latest, error = None, str(exc)
+            return None, str(exc)
         except Exception as exc:  # satu feed yang aneh tidak boleh menggagalkan semua distro
             log.exception("Cek versi %s gagal", distro)
-            latest, error = None, f"{type(exc).__name__}: {exc}"
+            return None, f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=max(1, len(sources))) as pool:
+        futures = {distro: pool.submit(newest, distro, source) for distro, source in sources.items()}
+        owner = {future: distro for distro, future in futures.items()}
+        waiting = dict.fromkeys(sources)
+        for future in as_completed(owner):
+            waiting.pop(owner[future], None)
+            if progress is not None and waiting:
+                progress([sources[d].NAME for d in waiting])
+    rows = []
+    for distro, source in sources.items():
+        latest, error = futures[distro].result()
         rows.append(
             CatalogRow(
                 distro,

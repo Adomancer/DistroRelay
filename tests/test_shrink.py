@@ -75,7 +75,8 @@ def make_runner(after_size=None, fail=False):
     runner.add("ps:shrink-query", json.dumps(BEFORE))
 
     def resized(args):
-        runner.add("ps:shrink-query", json.dumps({**BEFORE, "Size": after_size}))
+        runner.add("ps:shrink-after", json.dumps({key: BEFORE[key] for key in ("DiskNumber", "Guid", "Offset")}
+                                                 | {"Size": after_size}))
 
     runner.add("ps:shrink-c", "{}", returncode=1 if fail else 0, stderr="Resize gagal" if fail else "",
                effect=None if fail else resized)
@@ -89,6 +90,8 @@ def test_execute_runs_only_the_planned_script_and_post_checks(tmp_path):
     assert result.ok and result.after.size == plan.new_size
     scripts = [decode_powershell(c) for c in runner.calls]
     assert scripts.count(plan.script) == 1
+    # P-3: post-check tidak mengulang Get-PartitionSupportedSize (query info bisa ±1 menit).
+    assert scripts.count(shrink.QUERY_SCRIPT) == 0 and scripts.count(shrink.AFTER_SCRIPT) == 1
     [session] = sessions(tmp_path)
     assert session.finished and session.ok and session.post_check_ok and not session.needs_attention
 
@@ -119,13 +122,13 @@ def test_other_resize_scripts_are_refused(tmp_path):
 
 
 def run_cli(monkeypatch, tmp_path, size, answers):
-    from distrorelay import __main__ as cli
+    from distrorelay.cli import system as cli
 
     replies = iter(answers)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(replies))
     plan_size = shrink.plan_shrink(drive(), int(size * GIB)).new_size if size else None
     runner = make_runner(after_size=plan_size)
-    code = cli._run_shrink_command(Namespace(size=size), inner=runner, journal_root=tmp_path)
+    code = cli.cmd_shrink(Namespace(size=size), inner=runner, journal_root=tmp_path)
     return code, runner
 
 

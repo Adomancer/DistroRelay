@@ -18,6 +18,7 @@ from typing import Callable
 
 from . import DETACHED_ISO, VERIFIED_FILE, KeySpec, Release, SavedRelease, release_folder, save_release
 from . import download as download_mod
+from ..uncached import sha256_uncached
 from .verify import GpgvRun, Step, Verification, run_gpgv, sha256_file, signed_sha256, verify_release
 
 FAT32_LIMIT = 4 * 1024**3 - 1
@@ -108,8 +109,11 @@ def prepare(
         if iso.is_file():  # gagal bukan karena isi ISO (mis. gpgv bermasalah): jangan unduh ulang
             return PrepareResult(release, folder, existing, notes)
         notes.append("ISO lama tidak lolos verifikasi, jadi disisihkan (.rejected) dan diunduh ulang.")
-    tools.download(release.iso_url, iso, expected_size=release.size, progress=progress, should_stop=should_stop)
-    result = verify_release(release, folder, keys, gpgv=tools.gpgv, run=tools.run_gpgv, progress=hash_progress)
+    downloaded: list[str] = []  # SHA256 yang dihitung sambil mengunduh (ISO tidak dibaca ulang hanya untuk di-hash)
+    tools.download(release.iso_url, iso, expected_size=release.size, progress=progress, should_stop=should_stop,
+                   on_sha256=downloaded.append)
+    result = verify_release(release, folder, keys, gpgv=tools.gpgv, run=tools.run_gpgv, progress=hash_progress,
+                            known_sha256=downloaded[-1] if downloaded else None)
     _record(release, folder, result)
     if not result.ok and not iso.is_file():
         notes.append(f"ISO yang gagal verifikasi disimpan sebagai {release.iso_name}{REJECTED_SUFFIX}; jangan dipakai.")
@@ -142,6 +146,14 @@ def copy_to_drive(
     iso = saved.iso_path
     if not iso.is_file():
         return [Step("ISO", False, f"{iso} belum terunduh")]
+    recorded = _verified_iso_sha256(saved)
+    if release.scheme == DETACHED_ISO and recorded:
+        # Arch menandatangani ISO-nya langsung: gpgv ulang = membaca seluruh ISO lagi. ISO ini sudah lolos gpgv dengan
+        # SHA256 yang tercatat; SHA256 saat menyalin harus sama persis, jadi isi yang berubah tetap tertolak.
+        when = (saved.verified or {}).get("verified_at", "sebelumnya")
+        steps = [Step("Tanda tangan GPG", True, f"{iso.name}: lolos gpgv {when}; isinya dicocokkan lewat SHA256 saat disalin")]
+        return steps + copy_verified(iso, Path(target), recorded, filesystem=filesystem, progress=progress,
+                                     hash_progress=hash_progress, disk_usage=disk_usage)
     signed = signed_sha256(release, saved.folder, keys, gpgv=tools.gpgv, run=tools.run_gpgv)
     steps = list(signed.steps)
     if not signed.ok or not signed.sha256:
@@ -150,6 +162,19 @@ def copy_to_drive(
         return steps
     return steps + copy_verified(iso, Path(target), signed.sha256, filesystem=filesystem, progress=progress,
                                  hash_progress=hash_progress, disk_usage=disk_usage)
+
+
+def _verified_iso_sha256(saved: SavedRelease) -> str | None:
+    """SHA256 dari verified.json kalau catatannya untuk ISO ini, cocok dengan nilai rilisnya, dan ukurannya sama."""
+    verified = saved.verified or {}
+    digest = str(verified.get("sha256") or "").lower()
+    try:
+        size = saved.iso_path.stat().st_size
+    except OSError:
+        return None
+    same = (verified.get("iso_name") == saved.release.iso_name and verified.get("size") == size
+            and digest and digest == (saved.release.sha256 or "").lower())
+    return digest if same else None
 
 
 def copy_verified(
@@ -166,7 +191,11 @@ def copy_verified(
     dest = target_dir / source.name
     label = f"Salin ke {target_dir}"
     if dest.exists():
-        if dest.is_file() and dest.stat().st_size == size and sha256_file(dest, hash_progress) == expected_sha256:
+        try:
+            same = dest.is_file() and dest.stat().st_size == size and sha256_uncached(dest, hash_progress) == expected_sha256
+        except OSError as exc:
+            return [Step(label, False, f"{dest} sudah ada tapi tidak bisa dibaca ({exc.strerror or exc}); tidak ditimpa")]
+        if same:
             return [Step(label, True, f"{dest.name} sudah ada dan identik; tidak disalin ulang")]
         return [Step(label, False, f"{dest} sudah ada tapi isinya berbeda; tidak ditimpa (pindahkan/hapus sendiri)")]
     if (filesystem or "").upper() == "FAT32" and size > FAT32_LIMIT:
@@ -194,9 +223,22 @@ def copy_verified(
     if digest.hexdigest() != expected_sha256:
         partial.unlink(missing_ok=True)
         return [Step(label, False, "ISO sumber berubah atau rusak saat dibaca (SHA256 tidak cocok); tidak disalin")]
-    os.replace(partial, dest)
+    try:
+        if os.path.lexists(dest):  # muncul selama penyalinan (menit-menit): jangan ditimpa
+            raise FileExistsError(dest)
+        os.rename(partial, dest)  # di Windows os.rename juga gagal kalau tujuan sudah ada
+    except FileExistsError:
+        partial.unlink(missing_ok=True)
+        return [Step(label, False, f"{dest} muncul selama penyalinan; tidak ditimpa")]
     steps = [Step(label, True, f"{dest.name} ({size} byte)")]
-    readback = sha256_file(dest, hash_progress)
+    # Dibaca langsung dari perangkat, bukan dari cache Windows, supaya yang dibuktikan isi USB-nya.
+    try:
+        readback = sha256_uncached(dest, hash_progress)
+    except OSError as exc:
+        dest.unlink(missing_ok=True)
+        steps.append(Step("Baca ulang dari USB", False,
+                          f"tidak bisa dibaca langsung dari USB ({exc.strerror or exc}); salinan dihapus (cek USB-nya)"))
+        return steps
     if readback != expected_sha256:
         dest.unlink(missing_ok=True)
         steps.append(Step("Baca ulang dari USB", False, "SHA256 salinan berbeda; salinan dihapus (cek USB-nya)"))

@@ -127,15 +127,15 @@ def test_restore_refuses_a_different_esp(tmp_path):
 
 
 def test_cli_restore_runs_on_the_flow(tmp_path, monkeypatch):
-    from distrorelay.__main__ import _run_restore_command
+    from distrorelay.cli.uninstall import cmd_restore
 
     flow, bcd, backup_id = uninstalled(tmp_path)
     monkeypatch.setattr("builtins.input", lambda prompt="": "PULIHKAN")
     args = argparse.Namespace(backup=backup_id, esp_item=["EFI\\fedora"], boot_entry=["Fedora"])
-    assert _run_restore_command(args, flow=RestoreFlow(flow.deps)) == 0
+    assert cmd_restore(args, flow=RestoreFlow(flow.deps)) == 0
     assert (tmp_path / "esp" / "EFI" / "fedora").is_dir() and len(fedora_entries(bcd)) == 1
 
     monkeypatch.setattr("builtins.input", lambda prompt="": "pulihkan")
     args = argparse.Namespace(backup=backup_id, esp_item=["EFI\\Arch"], boot_entry=[])
-    assert _run_restore_command(args, flow=RestoreFlow(flow.deps)) == 1
+    assert cmd_restore(args, flow=RestoreFlow(flow.deps)) == 1
     assert not (tmp_path / "esp" / "EFI" / "Arch").exists()

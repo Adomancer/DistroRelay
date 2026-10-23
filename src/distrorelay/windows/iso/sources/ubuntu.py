@@ -1,8 +1,9 @@
 """Ubuntu (LTS, desktop): feed `meta-release-lts`; `SHA256SUMS` + `SHA256SUMS.gpg` di releases.ubuntu.com.
 
 Nama ISO diambil dari SHA256SUMS (rilis titik seperti 26.04.1 bisa muncul belakangan dari versi di feed).
-Kunci: "Ubuntu CD Image Automatic Signing Key" 2012 dan 2004, dari keyserver.ubuntu.com, dicocokkan dengan
-https://ubuntu.com/tutorials/how-to-verify-ubuntu (2026-10-22).
+Kunci: "Ubuntu CD Image Automatic Signing Key (2012)" (RSA-4096), dari keyserver.ubuntu.com, dicocokkan dengan
+https://ubuntu.com/tutorials/how-to-verify-ubuntu (2026-10-22). Kunci 2004 (DSA-1024, terlalu lemah) tidak dipakai;
+rilis yang masih didukung ditandatangani kunci 2012.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ KEYS = KeySpec.bundled(
     "ubuntu.gpg",
     {
         "843938DF228D22F7B3742BC0D94AA3F0EFE21092",  # Ubuntu CD Image Automatic Signing Key (2012)
-        "C5986B4F1257FFA86632CBA746181433FBB75451",  # Ubuntu CD Image Automatic Signing Key (2004)
     },
 )
 EDITIONS = ("desktop",)

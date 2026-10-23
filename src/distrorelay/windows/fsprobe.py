@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import struct
 import uuid
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -159,6 +160,61 @@ def probe_bytes(data: bytes) -> FsInfo | None:
         if info is not None:
             return info
     return None
+
+
+_GPT_SIGNATURE = b"EFI PART"
+_MAX_GPT_ENTRIES = 1024
+
+
+def parse_gpt_slots(header: bytes, entries: bytes) -> dict[int, str]:
+    """Nomor slot GPT (1-based, seperti `gptN` di GRUB) -> GUID unik partisi, dari header + array entri GPT.
+
+    Nomor partisi Windows tidak selalu sama dengan nomor slot: slot kosong di tengah (bekas partisi yang dihapus)
+    dilewati Windows tapi tidak oleh GRUB.
+    """
+    if len(header) < 92 or header[:8] != _GPT_SIGNATURE:
+        raise ValueError("Header GPT tidak dikenali")
+    header_size, header_crc = struct.unpack_from("<II", header, 12)
+    count, size, array_crc = struct.unpack_from("<III", header, 80)
+    _check_entry_layout(count, size)
+    if not 92 <= header_size <= len(header):
+        raise ValueError(f"Ukuran header GPT tidak wajar ({header_size})")
+    zeroed = header[:16] + b"\0\0\0\0" + header[20:header_size]
+    if zlib.crc32(zeroed) & 0xFFFFFFFF != header_crc:
+        raise ValueError("CRC header GPT tidak cocok")
+    if len(entries) < count * size:
+        raise ValueError(f"Array entri GPT terpotong ({len(entries)} dari {count * size} byte)")
+    if zlib.crc32(entries[: count * size]) & 0xFFFFFFFF != array_crc:
+        raise ValueError("CRC array entri GPT tidak cocok")
+    slots = {}
+    for index in range(count):
+        entry = entries[index * size : index * size + 128]
+        if entry[:16] == b"\0" * 16:  # tipe kosong = slot tidak dipakai
+            continue
+        slots[index + 1] = "{" + str(uuid.UUID(bytes_le=entry[16:32])) + "}"
+    return slots
+
+
+def _check_entry_layout(count: int, size: int) -> None:
+    if not 0 < count <= _MAX_GPT_ENTRIES or not 128 <= size <= 4096 or size % 128:
+        raise ValueError(f"Header GPT tidak wajar ({count} entri x {size} byte)")
+
+
+def read_gpt_slots(disk_number: int, sector_size: int = 512) -> dict[int, str]:
+    """Baca header GPT (LBA 1) dan array entrinya langsung dari disk fisik (read-only, butuh Administrator)."""
+    with open(rf"\\.\PhysicalDrive{disk_number}", "rb", buffering=0) as disk:
+        disk.seek(sector_size)
+        header = disk.read(sector_size)
+        if header[:8] != _GPT_SIGNATURE:
+            raise ValueError(f"Disk {disk_number} tidak punya header GPT")
+        start_lba = struct.unpack_from("<Q", header, 72)[0]
+        count, size = struct.unpack_from("<II", header, 80)
+        _check_entry_layout(count, size)  # sebelum membaca: ukuran rusak tidak boleh meminta baca raksasa
+        length = count * size
+        length += (-length) % sector_size
+        disk.seek(start_lba * sector_size)
+        entries = disk.read(length)
+    return parse_gpt_slots(header, entries)
 
 
 def read_partition_head(

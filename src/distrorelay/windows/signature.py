@@ -6,12 +6,12 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .runner import Runner, powershell_args
+from .runner import Runner, powershell_args, ps_string
 
 SIGNATURE_SCRIPT = r"""# distrorelay:authenticode
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$s = Get-AuthenticodeSignature -LiteralPath '__PATH__'
+$s = Get-AuthenticodeSignature -LiteralPath __PATH__
 $c = $s.SignerCertificate
 [pscustomobject]@{
   Status = [string]$s.Status; Message = $s.StatusMessage
@@ -45,7 +45,7 @@ class Signature:
 
 
 def signature_script(path: Path | str) -> str:
-    return SIGNATURE_SCRIPT.replace("__PATH__", str(path).replace("'", "''"))
+    return SIGNATURE_SCRIPT.replace("__PATH__", ps_string(str(path)))
 
 
 def parse_signature(text: str) -> Signature:

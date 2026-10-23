@@ -23,12 +23,13 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from distrorelay.common.profile import home_relative
 
 from . import dotfiles
 from .distro import Distro
+from .kit import sha256_file
 from .runner import command
 
 BACKUP_FORMAT = 1
@@ -38,6 +39,8 @@ SENSITIVE = "sensitive.tar.gz.gpg"
 _BASE_DIR = Path(__file__).resolve().parent.parent / "distrorelay" / "common" / "data" / "base_packages"
 # OpenPGP: paket pertama file terenkripsi simetris = Symmetric-Key Encrypted Session Key (tag 3).
 _SKESK_HEADERS = (b"\x8c", b"\x8d", b"\xc3")
+# Arsip file sensitif dibuat di memori (isi rahasia tidak pernah ditulis tanpa enkripsi), jadi ukurannya dibatasi.
+SENSITIVE_LIMIT = 256 * 1024 * 1024
 
 
 class BackupError(RuntimeError):
@@ -209,7 +212,7 @@ def _gpg_env() -> dict:
 
 def encrypt(runner, data: bytes) -> bytes:
     result = runner.run_bytes(
-        command("gpg", "--symmetric", "--cipher-algo", "AES256", "--output", "-", env=_gpg_env()), data
+        command("gpg", "--symmetric", "--cipher-algo", "AES256", "--no-armor", "--output", "-", env=_gpg_env()), data
     )
     if not result.ok or not result.data[:1] in _SKESK_HEADERS:
         raise BackupError(f"gpg gagal mengenkripsi (kode {result.returncode})")
@@ -282,8 +285,8 @@ def create_backup(
                          "not_carried": sorted(set(auto_removed + aur_removed + excluded))},
             "profile_update": update,
             "sensitive": sensitive_info,
-            "files": [{"path": n, "size": (staging / n).stat().st_size,
-                       "sha256": sha256_bytes((staging / n).read_bytes())} for n in files],
+            "files": [{"path": n, "size": (staging / n).stat().st_size, "sha256": sha256_file(staging / n)}
+                      for n in files],
             "notes": notes,
             "warning": "Bukan backup dokumen/foto/kode: hanya daftar paket dan dotfiles.",
         }
@@ -294,6 +297,14 @@ def create_backup(
         staging.rename(final)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
+        if sensitive_info and sensitive_info["location"] != "here":
+            # Salinan terenkripsi di kit USB lain milik backup yang batal ini: jangan ditinggal yatim.
+            elsewhere = Path(sensitive_info["location"])
+            (elsewhere / SENSITIVE).unlink(missing_ok=True)
+            try:
+                elsewhere.rmdir()
+            except OSError:
+                pass
         raise
     return BackupResult(final, manifest, notes)
 
@@ -312,8 +323,10 @@ def _backup_sensitive(runner, kit, staging: Path, backup_id: str, home: Path, us
             return None
         target_dir, location = others[0] / backup_id, str(others[0] / backup_id)
     buffer = io.BytesIO()  # isi rahasia hanya di memori; yang ditulis ke disk hanya hasil enkripsi
-    report = dotfiles.write_archive(buffer, home, [home_relative(p) for p in kit.profile.sensitive])
+    report = dotfiles.write_archive(buffer, home, [home_relative(p) for p in kit.profile.sensitive],
+                                    follow_symlinks=True, max_total_size=SENSITIVE_LIMIT)
     notes += [f"File sensitif {rel} tidak dibackup: {why}" for rel, why in report.skipped]
+    notes += [f"File sensitif {rel} adalah symlink; isi {target} yang dienkripsi" for rel, target in report.followed]
     try:
         encrypted = encrypt(runner, buffer.getvalue())
     except BackupError as exc:  # mis. prompt passphrase dibatalkan: sisa backup tetap jalan
@@ -337,7 +350,9 @@ def read_manifest(path: Path) -> dict:
     return manifest
 
 
-def verify(path: Path) -> list[str]:
+def verify(path: Path, *, hashes: bool = True) -> list[str]:
+    """Masalah integritas backup (kosong = cocok dengan manifest). `hashes=False` = cek cepat: file ada dan ukurannya
+    sama, tanpa membaca isinya (cukup untuk info, bukan untuk memakai isinya)."""
     path = Path(path)
     try:
         manifest = read_manifest(path)
@@ -350,34 +365,45 @@ def verify(path: Path) -> list[str]:
             problems.append(f"{name!r}: nama file tidak dikenal di manifest")
         elif not (path / name).is_file():
             problems.append(f"{name}: hilang")
-        elif sha256_bytes((path / name).read_bytes()) != entry.get("sha256"):
+        elif not hashes:
+            if (path / name).stat().st_size != entry.get("size"):
+                problems.append(f"{name}: ukurannya berubah")
+        elif sha256_file(path / name) != entry.get("sha256"):
             problems.append(f"{name}: isinya berubah (hash tidak cocok)")
+    listed = {str(entry.get("path", "")) for entry in manifest.get("files", [])}
+    for name in (DOTFILES, SENSITIVE):
+        if (path / name).exists() and name not in listed:
+            problems.append(f"{name}: ada di folder tapi tidak tercatat di manifest")
     return problems
 
 
-def list_backups(backups_dir: Path) -> list[tuple[Path, dict | None, list[str]]]:
-    """Semua backup di folder itu (terbaru dulu): (folder, manifest atau None, masalah verifikasi)."""
+def iter_backups(backups_dir: Path, *, hashes: bool = True) -> Iterator[tuple[Path, dict | None, list[str]]]:
+    """Backup di folder itu satu per satu, terbaru dulu: (folder, manifest atau None, masalah verifikasi).
+    Diverifikasi saat diambil, jadi pemanggil yang berhenti di backup pertama tidak membaca sisanya."""
     try:
         folders = sorted((p for p in Path(backups_dir).iterdir() if p.is_dir() and not p.name.startswith(".")),
                          reverse=True)
     except OSError:
-        return []
-    result = []
+        return
     for folder in folders:
         if not (folder / MANIFEST).exists() and (folder / SENSITIVE).exists():
             continue  # salinan file sensitif milik backup di kit lain (kit itu tidak di USB), bukan backup sendiri
         try:
             manifest = read_manifest(folder)
         except BackupError as exc:
-            result.append((folder, None, [str(exc)]))
+            yield folder, None, [str(exc)]
             continue
-        result.append((folder, manifest, verify(folder)))
-    return result
+        yield folder, manifest, verify(folder, hashes=hashes)
+
+
+def list_backups(backups_dir: Path, *, hashes: bool = True) -> list[tuple[Path, dict | None, list[str]]]:
+    """Semua backup di folder itu (terbaru dulu): (folder, manifest atau None, masalah verifikasi)."""
+    return list(iter_backups(backups_dir, hashes=hashes))
 
 
 def latest_backup(backups_dir: Path) -> Path | None:
-    """Backup terbaru yang lolos verifikasi."""
-    return next((folder for folder, manifest, problems in list_backups(backups_dir) if manifest and not problems), None)
+    """Backup terbaru yang lolos verifikasi. Backup yang lebih lama tidak dibaca."""
+    return next((folder for folder, manifest, problems in iter_backups(backups_dir) if manifest and not problems), None)
 
 
 def sensitive_path(folder: Path, manifest: dict, search_dirs: list[Path]) -> Path | None:
@@ -387,7 +413,7 @@ def sensitive_path(folder: Path, manifest: dict, search_dirs: list[Path]) -> Pat
         return None
     candidates = [Path(folder) / SENSITIVE] + [Path(d) / manifest.get("backup_id", "") / SENSITIVE for d in search_dirs]
     for candidate in candidates:
-        if candidate.is_file() and sha256_bytes(candidate.read_bytes()) == info.get("sha256"):
+        if candidate.is_file() and sha256_file(candidate) == info.get("sha256"):
             return candidate
     return None
 
