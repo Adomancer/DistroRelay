@@ -22,7 +22,7 @@ kecuali ada backup dengan salinan terverifikasi di drive eksternal, USB darurat 
 | M4 | Profil (TOML) + peta nama paket per distro, export Linux kit ke USB/NTFS, `setup` di distro baru | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
 | M5 | `backup` di distro lama (paket dikurasi, dotfiles, file sensitif terenkripsi di USB), `profile import` | ✅ kode + test simulasi; belum dicoba di Linux sungguhan |
 | M6 | ISO manager (cek versi terbaru, unduh yang bisa dilanjutkan, verifikasi GPG + SHA256, salin ke Ventoy), shrink C: | ✅ kode + test (tanda tangan asli distro dicek dengan gpgv); unduh ISO penuh, salin ke Ventoy, dan shrink di VM belum |
-| M7 | Rilis `.exe` (PyInstaller, tanpa Python), `selftest`, workflow GitHub untuk rilis draft | ✅ `.exe` dibuild + `selftest` lolos di laptop ini; workflow GitHub belum pernah dijalankan |
+| M7 | Rilis `.exe` (PyInstaller, tanpa Python), `selftest`, workflow GitHub untuk rilis draft | ✅ `.exe` dibuild + `selftest` lolos di laptop ini; workflow GitHub lolos untuk rilis v0.7.0 (E-7) |
 
 ## Apa yang dilakukan scan
 

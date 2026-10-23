@@ -189,19 +189,19 @@ lalu `.venv\Scripts\python.exe -m PyInstaller packaging\distrorelay.spec --nocon
 
 | # | Langkah | Yang dicek | Lolos |
 |---|---|---|---|
-| R-1 | `distrorelay scan`, lalu buka log hari ini di `%LOCALAPPDATA%\DistroRelay\logs\` | Ada baris `NVRAM: 259 variabel diminta (N Boot#### ada) dalam X detik`; kirim angka X (P-2: kalau lebih dari ±1 detik, enumerasi nama variabel dibuat) | [ ] |
-| R-2 | `distrorelay iso check` | 4 distro tampil; status "menunggu …" menyebut distro yang belum selesai; total jauh lebih cepat dari sebelumnya | [ ] |
-| R-3 | `distrorelay shrink-c` (tanpa `--size`) | Info sama seperti I-9; catat lamanya (post-check shrink sesudah perbaikan tidak mengulang query ini) | [ ] |
-| R-4 | `distrorelay journal`; kalau ada sesi lama yang masih "butuh perhatian": `distrorelay journal --tuntaskan <sesi>` → ketik `tuntas` lalu ulangi dengan `TUNTAS` | Huruf kecil ditolak; sesudah `TUNTAS` sesi tampil "ditandai tuntas …" dan banner kuning dashboard hilang | [ ] |
-| R-5 | GitHub → Actions → "Rilis exe" → Run workflow (branch ini) | Hijau dengan action yang dipin SHA + `constraints.txt`; artifact berisi `.exe` + `.sha256` | [ ] |
+| CR-1 | `distrorelay scan`, lalu buka log hari ini di `%LOCALAPPDATA%\DistroRelay\logs\` | Ada baris `NVRAM: 259 variabel diminta (N Boot#### ada) dalam X detik`; kirim angka X (P-2: kalau lebih dari ±1 detik, enumerasi nama variabel dibuat) | [ ] |
+| CR-2 | `distrorelay iso check` | 4 distro tampil; status "menunggu …" menyebut distro yang belum selesai; total jauh lebih cepat dari sebelumnya | [ ] |
+| CR-3 | `distrorelay shrink-c` (tanpa `--size`) | Info sama seperti I-9; catat lamanya (post-check shrink sesudah perbaikan tidak mengulang query ini) | [ ] |
+| CR-4 | `distrorelay journal`; kalau ada sesi lama yang masih "butuh perhatian": `distrorelay journal --tuntaskan <sesi>` → ketik `tuntas` lalu ulangi dengan `TUNTAS` | Huruf kecil ditolak; sesudah `TUNTAS` sesi tampil "ditandai tuntas …" dan banner kuning dashboard hilang | [ ] |
+| CR-5 | GitHub → Actions → "Rilis exe" → Run workflow (branch ini) | Hijau dengan action yang dipin SHA + `constraints.txt`; artifact berisi `.exe` + `.sha256` | [ ] |
 
 **Di VM (snapshot dulu):**
 
 | # | Langkah | Yang dicek | Lolos |
 |---|---|---|---|
-| R-6 | Buat backup ke disk eksternal VM, colok satu disk virtual lagi (atau cabut lalu colok ulang disk backup sehingga nomornya bergeser), lalu wizard uninstall sampai gerbang dengan backup itu | Gerbang lolos (B-2); kalau partisi di disk Windows diubah (mis. shrink 1 GB), gerbang menolak dan menyebut nama disknya | [ ] |
-| R-7 | Edit `verification.json` backup itu: ubah satu `"ok": true` jadi `false`, lalu `uninstall --backup <id>` | Daftar backup menandai "GAGAL verifikasi saat dibuat"; gerbang menolak (B-1); tidak ada yang berubah | [ ] |
-| R-8 | Uninstall sampai langkah entri boot, hentikan (Ctrl+C), lalu Pulihkan entri + folder yang sudah terhapus | Sesi uninstall tampil "dituntaskan oleh pemulihan …" (B-5), wizard berikutnya tidak meminta LANJUT | [ ] |
+| CR-6 | Buat backup ke disk eksternal VM, colok satu disk virtual lagi (atau cabut lalu colok ulang disk backup sehingga nomornya bergeser), lalu wizard uninstall sampai gerbang dengan backup itu | Gerbang lolos (B-2); kalau partisi di disk Windows diubah (mis. shrink 1 GB), gerbang menolak dan menyebut nama disknya | [ ] |
+| CR-7 | Edit `verification.json` backup itu: ubah satu `"ok": true` jadi `false`, lalu `uninstall --backup <id>` | Daftar backup menandai "GAGAL verifikasi saat dibuat"; gerbang menolak (B-1); tidak ada yang berubah | [ ] |
+| CR-8 | Uninstall sampai langkah entri boot, hentikan (Ctrl+C), lalu Pulihkan entri + folder yang sudah terhapus | Sesi uninstall tampil "dituntaskan oleh pemulihan …" (B-5), wizard berikutnya tidak meminta LANJUT | [ ] |
 
 ## Khusus M2a (sudah bisa dicoba sekarang)
 
