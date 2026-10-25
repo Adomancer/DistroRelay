@@ -223,6 +223,8 @@ def backup_text(result) -> Text:
         )
     else:
         text.append("\nBackup lengkap dan terverifikasi (lokal + USB).\n", style="bold green")
+    if result.usb_dir:
+        text.append("Cabut drive eksternal lewat Safely Remove (Eject), jangan langsung dicabut.\n", style="yellow")
     return text
 
 

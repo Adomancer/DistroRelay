@@ -56,6 +56,31 @@ class Installed:
     aur: list[str] = field(default_factory=list)
     flatpak: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    core: list[str] = field(default_factory=list)  # debian: paket inti / pustaka menurut metadata dpkg, tidak dibawa
+
+
+# debootstrap (WSL, image cloud, sebagian installer) menandai semua paket Priority required/important sebagai "manual",
+# jadi `apt-mark showmanual` saja ikut membawa libc6, init, udev, dst. (uji laptop 2026-10-25, temuan T-7).
+_DEBIAN_CORE_PRIORITIES = {"required", "important"}
+_DEBIAN_LIB_SECTIONS = {"libs", "oldlibs"}
+
+
+def _debian_core(runner, problems: list[str]) -> set:
+    """Paket inti sistem (Essential, Priority required/important) dan pustaka (Section libs) menurut metadata dpkg."""
+    result = runner.run(command("dpkg-query", "-W", "-f=${Package}\t${Essential}\t${Priority}\t${Section}\n"))
+    if not result.ok:
+        problems.append(f"`dpkg-query` gagal: {result.output() or result.returncode}; paket inti sistem tidak bisa disaring")
+        return set()
+    core = set()
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 4:
+            continue
+        name, essential, priority, section = (f.strip() for f in fields)
+        if (essential == "yes" or priority in _DEBIAN_CORE_PRIORITIES
+                or section.rsplit("/", 1)[-1] in _DEBIAN_LIB_SECTIONS):  # Ubuntu: "universe/libs"
+            core.add(name)
+    return core
 
 
 def _lines(text: str) -> list[str]:
@@ -86,7 +111,11 @@ def installed_packages(runner, distro: Distro) -> Installed:
         found.aur = query("pacman", "-Qqem")  # "foreign": tidak dari repo resmi, umumnya dari AUR
         found.native = [p for p in explicit if p not in set(found.aur)]
     elif distro.family == "debian":
-        found.native = query("apt-mark", "showmanual")
+        manual = query("apt-mark", "showmanual")
+        core = _debian_core(runner, found.problems) if manual else set()
+        # apt-mark menulis paket arsitektur lain sebagai nama:arch; dpkg-query ${Package} tanpa :arch.
+        found.core = [p for p in manual if p.split(":", 1)[0] in core]
+        found.native = [p for p in manual if p.split(":", 1)[0] not in core]
     if runner.which("flatpak"):
         found.flatpak = query("flatpak", "list", "--app", "--columns=application")
     return found
@@ -252,6 +281,8 @@ def create_backup(
     patterns = base_patterns(distro.family)
     native, auto_removed = filter_packages(installed.native, patterns, profile.exclude)
     aur, aur_removed = filter_packages(installed.aur, [], profile.exclude)
+    if installed.core:
+        notes.append(f"{len(installed.core)} paket inti sistem / pustaka tidak dibawa (Priority/Section dari dpkg)")
     if auto_removed:
         notes.append(f"{len(auto_removed)} paket sistem/hasil kurasi lama tidak dibawa")
     excluded = curate(native + aur)
@@ -401,9 +432,15 @@ def list_backups(backups_dir: Path, *, hashes: bool = True) -> list[tuple[Path, 
     return list(iter_backups(backups_dir, hashes=hashes))
 
 
-def latest_backup(backups_dir: Path) -> Path | None:
-    """Backup terbaru yang lolos verifikasi. Backup yang lebih lama tidak dibaca."""
-    return next((folder for folder, manifest, problems in iter_backups(backups_dir) if manifest and not problems), None)
+def latest_backup(backups_dir: Path, skipped: list | None = None) -> Path | None:
+    """Backup terbaru yang lolos verifikasi. Backup yang lebih lama tidak dibaca. `skipped` (kalau diberi) diisi
+    (folder, masalah) untuk backup lebih baru yang rusak dan dilewati, supaya setup bisa menyebutnya."""
+    for folder, manifest, problems in iter_backups(backups_dir):
+        if manifest and not problems:
+            return folder
+        if skipped is not None:
+            skipped.append((folder, problems))
+    return None
 
 
 def sensitive_path(folder: Path, manifest: dict, search_dirs: list[Path]) -> Path | None:

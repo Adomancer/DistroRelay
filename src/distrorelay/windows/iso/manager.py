@@ -18,6 +18,7 @@ from typing import Callable
 
 from . import DETACHED_ISO, VERIFIED_FILE, KeySpec, Release, SavedRelease, release_folder, save_release
 from . import download as download_mod
+from ...format import human_size
 from ..uncached import sha256_uncached
 from .verify import GpgvRun, Step, Verification, run_gpgv, sha256_file, signed_sha256, verify_release
 
@@ -77,6 +78,15 @@ def _record(release: Release, folder: Path, result: Verification) -> None:
         iso.replace(iso.with_name(iso.name + REJECTED_SUFFIX))
 
 
+def rejected_note(iso: Path) -> str | None:
+    """Catatan untuk ISO yang disisihkan karena gagal verifikasi (file .rejected tidak dihapus otomatis)."""
+    rejected = Path(iso).with_name(Path(iso).name + REJECTED_SUFFIX)
+    if not rejected.is_file():
+        return None
+    return (f"ISO yang gagal verifikasi disimpan sebagai {rejected} ({human_size(rejected.stat().st_size)}); "
+            "jangan dipakai, boleh dihapus kalau tidak perlu sebagai bukti.")
+
+
 def prepare(
     release: Release,
     keys: KeySpec,
@@ -85,8 +95,10 @@ def prepare(
     progress: Progress | None = None,
     hash_progress: Callable[[int, int], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    say: Callable[[str], None] | None = None,
 ) -> PrepareResult:
-    """Unduh file checksum/tanda tangan, cek tanda tangan dulu (kalau bisa), unduh ISO, lalu verifikasi penuh."""
+    """Unduh file checksum/tanda tangan, cek tanda tangan dulu (kalau bisa), unduh ISO, lalu verifikasi penuh.
+    `say` menerima pesan yang perlu tampil sebelum unduhan mulai (mis. unduhan dilanjutkan)."""
     folder = release_folder(release, tools.root)
     save_release(release, folder)
     notes = []
@@ -108,7 +120,11 @@ def prepare(
             return PrepareResult(release, folder, existing, notes)
         if iso.is_file():  # gagal bukan karena isi ISO (mis. gpgv bermasalah): jangan unduh ulang
             return PrepareResult(release, folder, existing, notes)
-        notes.append("ISO lama tidak lolos verifikasi, jadi disisihkan (.rejected) dan diunduh ulang.")
+        notes.append(" ".join(filter(None, ["ISO lama tidak lolos verifikasi, jadi disisihkan dan diunduh ulang.",
+                                            rejected_note(iso)])))
+    part = download_mod.part_path(iso)
+    if say is not None and part.is_file() and part.stat().st_size:
+        say(f"Melanjutkan unduhan dari {human_size(part.stat().st_size)} ({part.name})")
     downloaded: list[str] = []  # SHA256 yang dihitung sambil mengunduh (ISO tidak dibaca ulang hanya untuk di-hash)
     tools.download(release.iso_url, iso, expected_size=release.size, progress=progress, should_stop=should_stop,
                    on_sha256=downloaded.append)
@@ -116,7 +132,7 @@ def prepare(
                             known_sha256=downloaded[-1] if downloaded else None)
     _record(release, folder, result)
     if not result.ok and not iso.is_file():
-        notes.append(f"ISO yang gagal verifikasi disimpan sebagai {release.iso_name}{REJECTED_SUFFIX}; jangan dipakai.")
+        notes.append(rejected_note(iso) or f"ISO yang gagal verifikasi disimpan sebagai {release.iso_name}{REJECTED_SUFFIX}.")
     return PrepareResult(release, folder, result, notes)
 
 

@@ -111,7 +111,7 @@ def protected_esp_item(item: str) -> bool:
 
 def restore_esp_items(backup_dir: Path, items: Sequence[str], esp_root: Path) -> list[Verification]:
     backup_dir = Path(backup_dir)
-    manifest = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8-sig"))
     entries = manifest.get("esp_files", [])
     results: list[Verification] = []
     with zipfile.ZipFile(backup_dir / "esp.zip") as archive:

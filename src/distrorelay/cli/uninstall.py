@@ -98,6 +98,11 @@ def cmd_uninstall(args: argparse.Namespace, flow=None) -> int:
     plan = flow.select(args.select, extend_c=getattr(args, "extend_c", False))
     if flow.unknown:
         console.print(f"Tidak dikenal: {', '.join(flow.unknown)}", style="red", markup=False)
+        if unfinished:
+            # Mis. sesudah crash: folder yang sudah terhapus tidak muncul lagi di scan, sisanya tetap bisa dipilih.
+            console.print(f"Mungkin sudah dihapus oleh sesi {', '.join(s.path.stem for s in unfinished)} yang belum "
+                          "tuntas.", style="yellow", markup=False)
+        console.print(render.candidates_text(report.analysis))
         return 1
     console.print(render.plan_text(plan))
 

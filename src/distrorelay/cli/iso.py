@@ -94,6 +94,7 @@ def cmd_iso(args: argparse.Namespace, tools=None, volumes=None) -> int:
                     release, source.KEYS, tools,
                     progress=_progress_callback(progress, "Mengunduh"),
                     hash_progress=_progress_callback(progress, "Menghitung SHA256"),
+                    say=lambda message: console.print(message, style="dim", markup=False),
                 )
         except (DownloadStopped, KeyboardInterrupt):
             console.print("Unduhan dihentikan. Jalankan perintah yang sama lagi untuk melanjutkan.", style="yellow")
@@ -127,6 +128,9 @@ def cmd_iso(args: argparse.Namespace, tools=None, volumes=None) -> int:
             result = manager.reverify(saved, source.KEYS, tools,
                                       hash_progress=_progress_callback(progress, "Menghitung SHA256"))
         console.print(render.verifications_text("Verifikasi ulang", result.steps))
+        note = None if result.ok else manager.rejected_note(saved.iso_path)
+        if note:
+            console.print(f"  {note}", style="dim", markup=False)
         return 0 if result.ok else 1
 
     drive, note = _pick_drive(args.drive, volumes, required=True)

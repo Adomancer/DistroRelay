@@ -35,6 +35,7 @@ from .nvram import snapshot_from_raw
 from .runner import AllowListRunner, Runner, program_name
 from .preflight import M2A_CMDLETS
 from .scanner import ScanReport
+from .flush import FlushError, flush_volume
 from .uncached import sha256_uncached
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,9 @@ _SKIP_DIRS = {"system volume information"}
 BACKUP_ID = re.compile(r"^\d{8}-\d{6}$")
 # File ESP yang memang tidak bisa dibaca saat Windows jalan (hive BCD); dicadangkan lewat bcdedit /export.
 _LOCKED_ESP_FILE = re.compile(r"^efi\\microsoft\\boot\\bcd(\.log\d*)?$", re.IGNORECASE)
+# File ESP yang ditulis ulang Windows setiap boot: tetap dicadangkan, tapi perubahannya bukan alasan menolak backup
+# (uji VM CR-6: setiap reboot membatalkan backup, temuan T-4). Hanya di folder Windows, yang tidak pernah dihapus.
+VOLATILE_ESP_FILES = frozenset({"efi\\microsoft\\boot\\bootstat.dat"})
 
 
 _CHUNK = 1024 * 1024
@@ -194,6 +198,32 @@ def verify_tree(directory: Path, expected: list[dict], label: str, hasher: Calla
     return Verification(label, True, f"{len(expected)} file dibaca ulang, semua hash cocok")
 
 
+FLUSH_CHECK = "Salinan USB sudah tertulis ke perangkat"
+
+
+def _is_drive_root(path: Path) -> bool:
+    path = Path(path)
+    return bool(path.drive) and path == Path(path.anchor)
+
+
+def flush_copy(usb: Path, usb_root: Path, flush: Callable[[Path], None] = flush_volume) -> Verification:
+    """Paksa salinan di drive eksternal tertulis ke perangkat sebelum diverifikasi: fsync tiap file, lalu flush volume
+    (hanya kalau `usb_root` root drive, mis. E:\\). Tanpa ini, drive yang dicabut segera sesudah backup bisa
+    menyimpan file yang rusak padahal verifikasinya cocok (uji VM CR-6, temuan T-6)."""
+    count = 0
+    try:
+        for dirpath, _, filenames in os.walk(usb):
+            for name in filenames:
+                with open(Path(dirpath) / name, "r+b") as handle:
+                    os.fsync(handle.fileno())
+                count += 1
+        if _is_drive_root(usb_root):
+            flush(Path(usb_root))
+    except (OSError, FlushError) as exc:
+        return Verification(FLUSH_CHECK, False, f"Gagal menulis cache ke {usb_root}: {exc}. Buat backup baru")
+    return Verification(FLUSH_CHECK, True, f"{count} file di-fsync dan volume {Path(usb_root).drive or usb_root} di-flush")
+
+
 def verify_backup_dir(directory: Path, hasher: Callable = sha256_file) -> list[Verification]:
     """Verifikasi ulang folder backup (lokal atau USB) terhadap manifest.json-nya.
 
@@ -201,7 +231,7 @@ def verify_backup_dir(directory: Path, hasher: Callable = sha256_file) -> list[V
     """
     directory = Path(directory)
     try:
-        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
         return [Verification("manifest.json", False, f"Tidak bisa dibaca: {exc}")]
     if not isinstance(manifest, dict):
@@ -222,7 +252,7 @@ def creation_checks(directory: Path) -> list[Verification] | None:
     """Hasil verifikasi saat backup dibuat (verification.json): BCD store terbaca, salinan USB, file ESP yang tidak
     bisa dibaca, dst. Sebagian cek itu tidak bisa diulang dari isi folder saja. None = tidak ada / rusak."""
     try:
-        data = json.loads((Path(directory) / "verification.json").read_text(encoding="utf-8"))
+        data = json.loads((Path(directory) / "verification.json").read_text(encoding="utf-8-sig"))
         return [Verification(str(v["name"]), bool(v["ok"]), str(v.get("message", ""))) for v in data]
     except (OSError, ValueError, TypeError, KeyError):
         return None
@@ -239,6 +269,7 @@ def create_backup(
     opener: Callable = open,
     progress: Callable[[str], None] | None = None,
     now: datetime | None = None,
+    flush: Callable[[Path], None] = flush_volume,
 ) -> BackupResult:
     say = progress or (lambda message: None)
     if local_only and usb_root is not None:
@@ -262,7 +293,7 @@ def create_backup(
     result = BackupResult(backup_id, str(final), None, local_only=local_only)
     try:
         _write_backup(report, runner, mount_esp, esp_part, local, result, usb_root=usb_root, local_only=local_only,
-                      opener=opener, say=say, now=now)
+                      opener=opener, say=say, now=now, flush=flush)
     except BaseException:
         shutil.rmtree(local, ignore_errors=True)
         raise
@@ -286,6 +317,7 @@ def _write_backup(
     opener: Callable,
     say: Callable[[str], None],
     now: datetime | None,
+    flush: Callable[[Path], None] = flush_volume,
 ) -> None:
     """Isi folder backup `local` (masih sementara) dan verifikasinya; hasilnya dicatat di `result`."""
     backup_id = result.backup_id
@@ -331,7 +363,8 @@ def _write_backup(
     checks = result.verifications
     checks.append(verify_zip(local / "esp.zip", result.esp_files))
     scanned = {f.path.lower(): f.sha256 for f in report.esp.files}
-    changed = [e["path"] for e in result.esp_files if scanned.get(e["path"].lower()) not in (None, e["sha256"])]
+    changed = [e["path"] for e in result.esp_files
+               if scanned.get(e["path"].lower()) not in (None, e["sha256"]) and e["path"].lower() not in VOLATILE_ESP_FILES]
     added = [e["path"] for e in result.esp_files if e["path"].lower() not in scanned]
     backed = {e["path"].lower() for e in result.esp_files} | {p.lower() for p in result.skipped}
     removed = [p for p in scanned if p not in backed]
@@ -389,6 +422,8 @@ def _write_backup(
             )
         else:
             result.usb_dir = str(usb)
+            say("Menulis cache drive eksternal ke perangkat…")
+            checks.append(flush_copy(usb, Path(usb_root), flush))
             say("Memverifikasi salinan di drive eksternal (dibaca langsung dari perangkat)…")
             checks.append(verify_files(usb, result.files + [BackupFile("manifest.json", 0, sha256_file(local / "manifest.json"))],
                                        "Hash salinan USB", sha256_uncached))

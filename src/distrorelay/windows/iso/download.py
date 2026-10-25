@@ -106,6 +106,11 @@ def fetch(
 _CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+|\*)")
 
 
+def part_path(dest: Path) -> Path:
+    """File tempat unduhan `dest` yang belum selesai disimpan (dilanjutkan saat perintahnya dijalankan lagi)."""
+    return Path(dest).with_name(Path(dest).name + ".part")
+
+
 def download(
     url: str,
     dest: Path,
@@ -126,7 +131,7 @@ def download(
     """
     _check_scheme(url, require_https)
     dest = Path(dest)
-    part = dest.with_name(dest.name + ".part")
+    part = part_path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     attempt = 0
     while True:

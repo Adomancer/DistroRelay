@@ -6,14 +6,17 @@ from __future__ import annotations
 
 
 def ask(prompt: str) -> str:
+    # PowerShell 5.1 dengan console UTF-8 menyisipkan BOM di depan teks yang di-pipe (`'ya' | distrorelay …` sampai
+    # sebagai '\ufeffya'); BOM bukan spasi, jadi tidak ikut terbuang oleh strip().
     try:
-        return input(prompt).strip()
+        return input(prompt).lstrip("\ufeff").strip()
     except EOFError:
         return ""
 
 
 def ask_word(prompt: str) -> str:
-    """Untuk kata konfirmasi (HAPUS, LANJUT, PULIHKAN): tidak di-strip, supaya spasi di depan tetap ditolak."""
+    """Untuk kata konfirmasi (HAPUS, LANJUT, PULIHKAN): tidak di-strip, supaya spasi di depan tetap ditolak. BOM juga
+    tidak dibuang: kata konfirmasi harus diketik, bukan di-pipe."""
     try:
         return input(prompt)
     except EOFError:
