@@ -1,62 +1,45 @@
-## DistroRelay 0.7.1 (pre-release)
+## DistroRelay 0.7.2 (pre-release)
 
 Toolkit distro-hopping untuk laptop dual-boot Windows 11 + Linux (GPT/UEFI): bersihkan sisa Linux lama (entri boot,
 folder ESP, partisi), siapkan distro baru (ISO terverifikasi di USB Ventoy, ruang kosong dari C:), lalu pasang ulang
 aplikasi + dotfiles lewat Linux kit.
 
-> ⚠️ **Pre-release.** `uninstall`, `restore`, dan `shrink-c` **mengubah sistem**. Uninstall EFI (M2) sudah lolos test di
-> VM; hapus partisi (M3), Linux kit (M4–M5), dan shrink C: (M6) baru lolos test otomatis. Coba di VM dulu, siapkan USB
-> darurat, dan baca [docs/RECOVERY.md](https://github.com/Adomancer/DistroRelay/blob/main/docs/RECOVERY.md).
+> ⚠️ **Pre-release.** `uninstall`, `restore`, dan `shrink-c` **mengubah sistem**. Uninstall EFI (M2), hapus dan
+> pulihkan partisi (M3), serta shrink C: (M6) sudah lolos test di VM; Linux kit (M4–M5) baru lolos test otomatis dan
+> dry-run di WSL. Coba di VM dulu, siapkan USB darurat, dan baca
+> [docs/RECOVERY.md](https://github.com/Adomancer/DistroRelay/blob/main/docs/RECOVERY.md).
 
-### Perubahan sejak 0.7.0
+### Perubahan sejak 0.7.1
 
-Perbaikan dari dua review kode (review tiga ronde oleh Fable 5.1, lalu code review lengkap). Tidak ada temuan yang
-membuat DistroRelay menghapus sesuatu di luar rencana; yang diperbaiki adalah kasus pinggir, pengaman, dan performa.
+Perbaikan dari uji VM dan uji di laptop asli (tanpa mengubah partisi). Tidak ada temuan yang membuat DistroRelay
+menghapus sesuatu di luar rencana: setiap kali, gerbang atau konfirmasi tetap menolak.
 
-**Uninstall dan Pulihkan**
+**Backup dan uninstall**
 
-- Backup yang gagal salah satu cek saat dibuat tidak bisa dipakai untuk uninstall; daftar backup menandainya.
-- Salinan backup di drive eksternal dibaca ulang langsung dari perangkat (bukan dari cache Windows) dan harus sama
-  persis dengan backup lokal. `--backup` hanya menerima ID backup, bukan path folder.
-- Flashdisk/HDD lain boleh dicolok atau dicabut di antara backup dan uninstall: layout hanya dibandingkan untuk disk
-  Windows dan disk yang partisinya dihapus.
-- Manifest backup yang rusak menghasilkan pesan gagal, bukan crash. Backup yang gagal di tengah tidak meninggalkan
-  folder setengah jadi.
-- Sesi yang terputus atau gagal bisa ditandai tuntas (`journal --tuntaskan <sesi>` atau layar Journal, ketik
-  `TUNTAS`). Uninstall yang semua item terhapusnya sudah dikembalikan lewat Pulihkan otomatis dianggap tuntas.
-- Pulihkan dan shrink C: dicatat di journal dan bisa dihentikan dengan rapi (Ctrl+C). Path dari manifest backup
-  divalidasi sebelum folder ESP dipulihkan.
-- Fallback `EFI\Boot\bootx64.efi` hanya dikembalikan ke milik Windows kalau memang tidak dipakai lagi. Folder alat
-  pabrikan (mis. `EFI\HP`) tidak pernah disentuh.
-- Path dari disk dikirim ke PowerShell sebagai base64, jadi nama berisi kutip tipografis tidak bisa memecah perintah.
-
-**Scan**
-
-- Rujukan GRUB `(,gptN)` dipetakan lewat tabel GPT asli (diverifikasi CRC), bukan nomor partisi Windows. Tanpa bukti
-  positif, hasilnya "tidak pasti".
-- Entri boot dari disk lain tidak lagi digabung dengan folder ESP yang namanya sama.
+- Salinan backup di drive eksternal sekarang benar-benar ditulis ke perangkat sebelum diverifikasi. Sebelumnya, drive
+  yang dicabut segera sesudah backup bisa menyimpan file yang rusak padahal verifikasi bilang ok. Hasil backup memuat
+  cek baru "Salinan USB sudah tertulis ke perangkat" dan mengingatkan untuk mencabut drive lewat Safely Remove.
+- Reboot di antara backup dan uninstall tidak lagi membatalkan backup: `EFI\Microsoft\Boot\bootstat.dat`, yang
+  ditulis Windows setiap boot, tidak dihitung sebagai perubahan ESP di gerbang maupun post-check.
+- Sesi uninstall yang gagal hanya dianggap tuntas oleh uninstall sukses yang ikut menghapus item yang tertinggal,
+  bukan oleh sembarang uninstall sukses.
+- `verification.json` atau `manifest.json` yang disimpan ulang dengan BOM (mis. dari PowerShell 5.1) tetap terbaca.
+- Pesan yang lebih jelas: `--select` yang sudah tidak ada sesudah crash disertai daftar kandidat yang tersisa; layout
+  yang berubah sebelum hapus partisi menyebut kemungkinan partisi baru (mis. dari Disk Management); `shrink-c` yang
+  ditolak hanya menampilkan alasannya.
 
 **Linux kit**
 
-- Backup Linux tidak lagi menggantikan pernyataan "DATA SUDAH DIBACKUP" saat uninstall.
-- File sensitif tidak bocor lewat symlink/hardlink dan dipulihkan dengan permission ketat; cadangan `.bak` tidak
-  ditimpa; apt dipanggil dengan `--no-remove`.
-- Verifikasi backup membaca file per 1 MiB (tidak lagi utuh ke RAM), arsip dotfiles dibatasi 2 GiB, dan wizard
-  uninstall tidak lagi beku saat menghitung cakupan backup Linux.
-- Di Arch, pemasangan per paket menjalankan `pacman -Syu` sekali, lalu `pacman -S --needed` per paket.
+- Backup di keluarga Debian/Ubuntu tidak lagi membawa paket inti sistem dan pustaka (dibaca dari metadata dpkg).
+  Di image hasil debootstrap seperti WSL, checklist turun dari 134 paket menjadi 7.
+- `setup` menyebut backup terbaru yang rusak, termasuk kalau backup yang lebih lama dipakai sebagai gantinya.
 
-**ISO manager**
+**ISO manager dan lain-lain**
 
-- `iso check` mengambil feed keempat distro bersamaan (timeout 20 detik).
-- SHA256 dihitung sambil mengunduh, dan unduhan menolak redirect ke alamat non-HTTPS.
-- File di USB yang isinya berbeda tidak ditimpa, dan salinan ISO dibaca ulang langsung dari perangkat. Kunci Ubuntu
-  DSA-1024 yang lama tidak lagi dipercaya.
-
-**Lain-lain**
-
-- Perintah yang meminta UAC menunggu jendela Administrator selesai, lalu keluar dengan kode yang sama.
-- Log harian yang lebih dari 30 hari dihapus otomatis; lama baca NVRAM dicatat di log.
-- `.exe` dibuild dengan action GitHub yang dipin ke SHA commit dan versi paket dari `packaging/constraints.txt`.
+- `iso download` memberi tahu kalau unduhan dilanjutkan dari file `.part`, dan ISO yang ditolak disebut lokasi serta
+  ukurannya.
+- Jawaban yang di-pipe dari PowerShell 5.1 (mis. `'ya' | distrorelay …`) tidak lagi gagal karena BOM. Kata konfirmasi
+  seperti `HAPUS` tetap harus diketik persis.
 
 ### Cara pakai
 
