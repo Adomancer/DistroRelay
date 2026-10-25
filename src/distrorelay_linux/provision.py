@@ -66,6 +66,7 @@ def build_plan(
     sensitive_file: Path | None = None,
     decrypt: Callable[[Path], bytes] | None = None,
     read_file: Callable[[str], str] = lambda path: Path(path).read_text(encoding="utf-8"),
+    broken_backup: str | None = None,
 ) -> SetupPlan:
     """`backup_dir` = folder backup dari distro lama (dotfiles.tar.gz); `sensitive_file` + `decrypt` = file sensitif
     terenkripsi dan cara mendekripsinya (gpg, passphrase diminta saat langkahnya jalan)."""
@@ -186,8 +187,14 @@ def build_plan(
                 action=lambda: restore_outcome(dotfiles.restore(archive, home, stamp)),
             )
         )
+        if broken_backup:
+            plan.notes.append(f"Backup terbaru {broken_backup} RUSAK, jadi dipakai backup {Path(backup_dir).name}")
     elif profile.dotfiles and not as_root:
-        plan.notes.append("Dotfiles belum dipulihkan: belum ada backup (dibuat dengan `backup` di distro lama)")
+        if broken_backup:
+            plan.notes.append(f"Dotfiles tidak dipulihkan: backup terbaru {broken_backup} RUSAK. "
+                              "Cek dengan `sh bootstrap.sh backups`")
+        else:
+            plan.notes.append("Dotfiles belum dipulihkan: belum ada backup (dibuat dengan `backup` di distro lama)")
     if sensitive_file is not None and decrypt is not None:
         plan.steps.append(
             Step(

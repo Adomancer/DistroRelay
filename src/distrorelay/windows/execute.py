@@ -28,7 +28,7 @@ from typing import Callable, Iterable, Sequence
 
 from ..format import human_size
 from . import flush
-from .backup import creation_checks, sha256_file, valid_backup_id, verify_backup_dir
+from .backup import VOLATILE_ESP_FILES, creation_checks, sha256_file, valid_backup_id, verify_backup_dir
 from .bootentries import BOOTMGR_ID, FWBOOTMGR_ID, load_firmware, merge_entries
 from .disks import DiskInventory, parse_inventory
 from .esp import contained_path, norm_path
@@ -269,7 +269,8 @@ class _Context:
         )
         raise ExecutionError(
             f"Layout disk {when} tidak sama dengan yang diharapkan ({detail}). Langkah partisi dibatalkan. "
-            "Kalau drive eksternal dicabut/dicolok selama proses, colok/cabut kembali lalu scan ulang"
+            "Ada partisi yang dibuat/diubah (mis. lewat Disk Management) atau drive yang dicolok/dicabut sejak "
+            "rencana dibuat; scan ulang dan buat rencana baru"
         )
 
     def durable_bcd(self) -> None:
@@ -670,7 +671,7 @@ def check_gate(
         # Isi folder tidak bisa dipercaya (manifest rusak, file hilang/berubah): cek lain di bawah tidak berarti.
         problems.append(f"Backup lokal tidak lolos verifikasi: {failed[0].name}: {failed[0].message}")
         return gate
-    manifest = json.loads((local / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((local / "manifest.json").read_text(encoding="utf-8-sig"))
     gate.manifest = manifest
     # Sebagian cek saat backup dibuat tidak bisa diulang dari isi folder (BCD store terbaca, entri firmware terbaca
     # ulang, file ESP yang dikunci), jadi hasilnya wajib hijau.
@@ -695,7 +696,8 @@ def check_gate(
             # Dibaca langsung dari perangkat (bukan cache), dan harus salinan dari backup yang sama persis.
             failed = [v for v in verify_backup_dir(external, sha256_uncached) if not v.ok]
             if failed:
-                problems.append(f"Salinan eksternal tidak lolos verifikasi: {failed[0].name}: {failed[0].message}")
+                problems.append(f"Salinan eksternal tidak lolos verifikasi: {failed[0].name}: {failed[0].message}. "
+                                "Buat backup baru, lalu cabut drive hanya lewat Safely Remove")
             elif sha256_file(external / "manifest.json") != sha256_file(local / "manifest.json"):
                 problems.append("Salinan eksternal bukan salinan backup lokal ini (manifest berbeda)")
 
@@ -711,12 +713,15 @@ def check_gate(
     else:
         backed_up = manifest_hashes(manifest)
         current = {f.path.lower(): f.sha256 for f in report.esp.files}
-        if backed_up != current:
-            changed = sorted(set(backed_up.items()) ^ set(current.items()))
-            problems.append(f"Isi ESP berubah sejak backup dibuat (mis. {changed[0][0]}); buat backup baru")
+        changed = sorted({path for path, _ in set(backed_up.items()) ^ set(current.items())})
+        real = [p for p in changed if p not in VOLATILE_ESP_FILES]
+        if real:
+            problems.append(f"Isi ESP berubah sejak backup dibuat (mis. {real[0]}); buat backup baru")
+        gate.notes += [f"{p} berubah sejak backup (ditulis Windows setiap boot), diabaikan"
+                       for p in changed if p in VOLATILE_ESP_FILES]
 
     entries_file = local / "firmware-entries.json"
-    backed_entries = json.loads(entries_file.read_text(encoding="utf-8")) if entries_file.exists() else []
+    backed_entries = json.loads(entries_file.read_text(encoding="utf-8-sig")) if entries_file.exists() else []
     backed_ids = {(e.get("bcd_id") or "").lower() for e in backed_entries}
     for action in plan.actions:
         if action.kind == "delete-boot-entry" and action.data.get("bcd_id", "").lower() not in backed_ids:

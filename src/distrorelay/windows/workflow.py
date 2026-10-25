@@ -43,7 +43,7 @@ from .backup import (
 from .bootrefs import Component, Installation
 from .esp import norm_path
 from .execute import DEV_FLAG_ENV, FAIL_AFTER_ENV, ExecutionResult, GateResult, check_gate, execute_plan, execution_runner
-from .journal import Journal, SessionSummary, incomplete_sessions, journal_dir
+from .journal import Journal, SessionSummary, incomplete_sessions, journal_dir, planned_items
 from .machine import Machine
 from .postcheck import post_check
 from .preflight import PreflightResult, external_volumes
@@ -213,7 +213,7 @@ def list_backups(root: Path) -> list[BackupInfo]:
         if not valid_backup_id(path.name):  # mis. .20261023-101500.tmp = backup yang sedang/gagal dibuat
             continue
         try:
-            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         if not isinstance(manifest, dict):
@@ -558,6 +558,7 @@ class UninstallFlow:
                 "select": self.plan.selected,
                 "plan_hash": ticket.plan_hash,
                 "actions": [a.title for a in self.plan.actions],
+                "planned": planned_items(self.plan.actions),
             },
         )
         extra = {"signature_of": self.deps.signature_of} if self.deps.signature_of else {}
@@ -685,8 +686,8 @@ class RestoreFlow:
             return self.verifications
         self.verifications = verify_backup_dir(directory)
         if all(v.ok for v in self.verifications):
-            self.manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-            self.records = json.loads((directory / "firmware-entries.json").read_text(encoding="utf-8"))
+            self.manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8-sig"))
+            self.records = json.loads((directory / "firmware-entries.json").read_text(encoding="utf-8-sig"))
             self.backup_layout = disks.parse_inventory((directory / "partitions.json").read_text(encoding="utf-8"))
             fsinfo_file = directory / "fsinfo.json"  # backup sebelum M3 tidak punya file ini
             self.backup_fsinfo = json.loads(fsinfo_file.read_text(encoding="utf-8")) if fsinfo_file.exists() else {}
@@ -827,7 +828,7 @@ class RestoreFlow:
         failed = [v for v in verify_backup_dir(directory) if not v.ok]
         if failed:
             return failed
-        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8-sig"))
         if _manifest_hash(manifest) != ticket.manifest_hash:
             return [Verification("Backup", False, "manifest.json berubah sejak backup dipilih")]
 

@@ -52,12 +52,13 @@ def cmd_shrink(args: argparse.Namespace, inner=None, journal_root: Path | None =
         console.print("Pakai --size GB untuk mengecilkan C:.", style="dim")
         return 0
     plan = shrink.plan_shrink(drive, int(args.size * shrink.GIB))
-    for line in plan.summary():
-        console.print(f"  {line}", markup=False)
     if not plan.ok:
+        # Ringkasan rencana yang ditolak bisa berisi angka negatif (mis. --size 9999), jadi hanya alasannya.
         for problem in plan.problems:
             console.print(f"  [GAGAL] {problem}", style="bold red", markup=False)
         return 1
+    for line in plan.summary():
+        console.print(f"  {line}", markup=False)
     unfinished = incomplete_sessions(journal_root)
     if unfinished:
         console.print(render.journal_text(unfinished))

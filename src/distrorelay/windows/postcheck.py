@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .backup import Verification
+from .backup import VOLATILE_ESP_FILES, Verification
 from .execute import BOOTMGFW, FALLBACK, manifest_hashes, relevant_disks
 from .scanner import ScanReport
 from .uninstall_plan import UninstallPlan
@@ -86,8 +86,11 @@ def post_check(plan: UninstallPlan, manifest: dict, before: ScanReport, after: S
         for path, digest in hashes.items()
         if not _under(path, deleted_paths) and not (restored_fallback and path == FALLBACK.lower())
     }
-    changed = sorted(p for p, digest in expected.items() if current.get(p) != digest)
-    added = sorted(p for p in current if p not in hashes and not (restored_fallback and p == FALLBACK.lower()))
+    # bootstat.dat ditulis Windows setiap boot: reboot di antara backup dan eksekusi bukan "file lain tersentuh"
+    # (uji VM U-4 2026-10-25: post-check gagal hanya karena file ini, padahal gerbang sudah mengabaikannya).
+    changed = sorted(p for p, digest in expected.items() if current.get(p) != digest and p not in VOLATILE_ESP_FILES)
+    added = sorted(p for p in current if p not in hashes and p not in VOLATILE_ESP_FILES
+                   and not (restored_fallback and p == FALLBACK.lower()))
     untouched = not changed and not added
     detail = "Semua file lain sama dengan backup"
     if not untouched:

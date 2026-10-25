@@ -102,6 +102,8 @@ class SessionSummary:
     changed: bool | None = None  # False = sesi selesai tanpa mengubah apa pun
     marked_resolved: JournalEntry | None = None  # entri "resolved" terakhir (ditandai tuntas oleh pengguna)
     touched: frozenset = frozenset()  # uninstall: item yang (mungkin) sudah dihapus, dalam bentuk _restorable_key
+    removed: frozenset = frozenset()  # uninstall: item yang langkahnya selesai ("done")
+    pending: frozenset | None = None  # uninstall: item rencana yang belum selesai; None = journal lama tanpa rencana
     irreversible: bool = False  # uninstall: C: sempat diperluas, jadi partisinya tidak bisa dipulihkan
     restored: frozenset = frozenset()  # restore: item yang dipulihkan sesi ini, dalam bentuk _restorable_key
 
@@ -130,6 +132,11 @@ def _restorable_key(kind: str | None, ref: str | None) -> tuple[str, str] | None
     if group == "entry" and value.startswith("nv:"):  # ref komponen uninstall -> label Boot#### di sesi restore
         value = "boot" + value[3:]
     return group, value
+
+
+def planned_items(actions) -> list[list[str]]:
+    """Item rencana uninstall yang bisa dipulihkan, untuk data session-start (aturan penuntasan di `sessions`)."""
+    return [list(key) for a in actions if (key := _restorable_key(a.kind, a.ref))]
 
 
 def _restored_keys(data: dict) -> frozenset:
@@ -161,6 +168,10 @@ def summarize(path: Path) -> SessionSummary:
     kind = str((start.data or {}).get("kind") or "uninstall") if start else "uninstall"
     # Langkah yang sempat dimulai dianggap mungkin sudah mengubah sesuatu, juga yang gagal di tengah.
     touched = frozenset(key for e in steps if e.status == "started" and (key := _restorable_key(e.kind, e.ref)))
+    removed = frozenset(key for e in steps if e.status == "done" and (key := _restorable_key(e.kind, e.ref)))
+    planned = (start.data or {}).get("planned") if start else None
+    pending = None if planned is None else frozenset(tuple(p) for p in planned) - removed
+    uninstall = kind == "uninstall"
     return SessionSummary(
         path=Path(path),
         started=start.time if start else "",
@@ -174,8 +185,10 @@ def summarize(path: Path) -> SessionSummary:
         kind=kind,
         changed=(end.data or {}).get("changed") if end else None,
         marked_resolved=next((e for e in reversed(entries) if e.status == "resolved"), None),
-        touched=touched if kind == "uninstall" else frozenset(),
-        irreversible=kind == "uninstall" and any(e.kind == "extend-c" for e in steps),
+        touched=touched if uninstall else frozenset(),
+        removed=removed if uninstall else frozenset(),
+        pending=pending if uninstall else None,
+        irreversible=uninstall and any(e.kind == "extend-c" for e in steps),
         restored=_restored_keys((start.data or {}) if start else {}) if kind == "restore" else frozenset(),
     )
 
@@ -210,8 +223,11 @@ def sessions(directory: Path | None = None) -> list[SessionSummary]:
             session.resolved_by, session.resolved_how = session.marked_resolved.time, "manual"
             continue
         # Sesi sejenis yang sukses menuntaskan: post-check shrink-c tidak berkata apa pun tentang uninstall yang
-        # terputus, dan sebaliknya.
-        later = next((s for s in found[n + 1 :] if s.kind == session.kind and _succeeded(s)), None)
+        # terputus, dan sebaliknya. Uninstall yang tercatat rencananya baru tuntas kalau sesi sukses itu ikut
+        # menghapus semua item yang belum selesai (uji VM M3-4: sesi gagal "dituntaskan" oleh sesi yang menghapus
+        # partisi lain, padahal partisinya sendiri masih ada).
+        later = next((s for s in found[n + 1 :] if s.kind == session.kind and _succeeded(s)
+                      and (session.pending is None or _covers(s.removed, session.pending))), None)
         if later is not None:
             session.resolved_by, session.resolved_how = later.path.stem, "sesi"
             continue

@@ -136,9 +136,13 @@ def cmd_setup(args) -> int:
     distro = distro_mod.read()
     runner = SubprocessRunner()
     is_root = os.geteuid() == 0
-    backup_dir, sensitive_file = None, None
+    backup_dir, sensitive_file, broken = None, None, None
     if args.backup == "latest":
-        backup_dir = backup_mod.latest_backup(kit.backups_dir)
+        skipped = []
+        backup_dir = backup_mod.latest_backup(kit.backups_dir, skipped)
+        if skipped:
+            folder, problems = skipped[0]
+            broken = f"{folder.name} ({'; '.join(problems)})"
     elif args.backup != "none":
         backup_dir = Path(args.backup)
         problems = backup_mod.verify(backup_dir)
@@ -152,13 +156,13 @@ def cmd_setup(args) -> int:
     # Folder kerja (build paru, pacman.conf baru) hanya dibuat kalau rencana benar-benar dijalankan, dan dihapus di akhir.
     workdir = str(Path(tempfile.gettempdir()) / "distrorelay-<sementara>") if args.dry_run else provision.new_workdir()
     try:
-        return _setup(args, kit, distro, runner, is_root, backup_dir, sensitive_file, workdir)
+        return _setup(args, kit, distro, runner, is_root, backup_dir, sensitive_file, workdir, broken)
     finally:
         if not args.dry_run:
             shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _setup(args, kit, distro, runner, is_root, backup_dir, sensitive_file, workdir: str) -> int:
+def _setup(args, kit, distro, runner, is_root, backup_dir, sensitive_file, workdir: str, broken=None) -> int:
     plan = provision.build_plan(
         kit.profile,
         kit.packages,
@@ -171,6 +175,7 @@ def _setup(args, kit, distro, runner, is_root, backup_dir, sensitive_file, workd
         backup_dir=backup_dir,
         sensitive_file=sensitive_file,
         decrypt=lambda path: backup_mod.decrypt(runner, path),
+        broken_backup=broken,
     )
     print(provision.plan_text(plan))
     note = _newer_kit_note(kit)
